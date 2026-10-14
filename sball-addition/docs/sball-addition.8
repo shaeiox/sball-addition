@@ -1,0 +1,382 @@
+.\" sball-addition manual page
+.\" Format with: groff -man -Tutf8 docs/sball-addition.8 | less
+.TH SBALL-ADDITION 8 "2026-10-14" "sball-addition 1.0.0" "System Administration"
+.SH NAME
+sball-addition \- managed hook system for the sballd (PVM) service
+.SH SYNOPSIS
+.B sball-addition
+[\fIglobal options\fR] \fIcommand\fR [\fIcommand options\fR]
+.br
+.B sballd-wrapper
+[\fIsballd arguments\fR]
+.SH DESCRIPTION
+.B sball-addition
+runs administrator supplied scripts (hooks) at two points of the
+.BR sballd (8)
+lifecycle:
+.TP
+.B pre-quorate
+before
+.B sballd
+starts, while the service is still down. A failing hook can abort the start.
+.TP
+.B post-quorate
+after the node has joined the PVM cluster and reports the
+.I quorate
+state. The node is fully operational at this point, which makes the phase
+suitable for registering with monitoring, synchronising configuration or
+warming caches.
+.PP
+The pre-quorate phase is driven by
+.BR sballd-wrapper ,
+which replaces
+.B sballd
+as the entry point of the service unit and
+.BR exec s
+the real daemon once the hooks succeeded. The post-quorate phase is driven by
+.BR "sball-addition watcher" ,
+a small process that polls the PVM XML-RPC socket (default
+.IR 127.0.0.1:7090 )
+until the local node reports
+.IR quorate .
+.PP
+Every action is written to a JSON lines log, so
+.BR jq (1)
+can be used for queries and alerting.
+.SH COMMANDS
+.TP
+.BI list " [\-\-phase=" phase "] [\-\-json] [\-\-strict]"
+Show every hook in execution order with phase, order, name, enabled flag,
+target and description. Execution order is: numeric filename prefix (so
+.I 10\-foo.sh
+runs before
+.IR 20\-bar.sh ),
+then the
+.B AFTER
+dependency, with ties broken by filename.
+.TP
+.BI run " hook-name [\-\-phase=" phase "] [\-\-force] [\-\-no\-state] [\-\-quiet]"
+Run a single hook immediately, honouring TIMEOUT, RETRY, RETRY_BACKOFF, TARGET
+and RUN_ONCE.
+.B \-\-force
+ignores a RUN_ONCE marker;
+.B \-\-no\-state
+leaves state and runtime files untouched.
+The hook's stdout/stderr are shown unless
+.B \-\-quiet
+is given. The exit status is the hook's exit status.
+.TP
+.BI run\-phase " phase [\-\-force] [\-\-quiet] [\-\-json]"
+Run every hook of a phase in order. This is the command
+.B sballd-wrapper
+uses; it exits non-zero when a hook with
+.B ON_FAIL=abort
+failed.
+.TP
+.B status [\-\-json]
+Show the version, sballd pid/state/uptime, the cluster master, watcher state,
+hook counts and the most recent pre/post-quorate hook outcome.
+.TP
+.BI log " [\-\-follow] [\-\-hook=" name "] [\-\-phase=" phase "] [\-\-since=" time "] [\-\-level=" level "] [\-\-limit=" n "] [\-\-pretty] [\-\-file=" path "]"
+Print the JSON log. Raw records are printed by default so the output can be
+piped into
+.BR jq ;
+.B \-\-pretty
+renders a compact human readable form.
+.B \-\-since
+accepts a duration
+.RI ( 10m ", " 2h ", " 1d )
+or a timestamp.
+.TP
+.BI enable " hook-name [\-\-phase=" phase "]"
+.TP
+.BI disable " hook-name [\-\-phase=" phase "]"
+Flip the
+.B ENABLED
+field inside the hook header. The hook file stays the single source of truth,
+so the change survives configuration management and is visible in
+.BR list .
+.TP
+.BI install\-hook " file \-\-phase=" phase " [\-\-order=" n "] [\-\-force]"
+Validate a hook script and install it into the phase directory, mode 0755. The
+header must declare the same phase as
+.BR \-\-phase .
+.TP
+.BI uninstall\-hook " hook-name [\-\-phase=" phase "] [\-\-keep\-state]"
+Remove a hook script together with its RUN_ONCE marker.
+.TP
+.B validate [\-\-phase=\fIphase\fR] [\-\-json]
+Check the configuration, directories, permissions, hook headers, ordering and
+socket reachability. Exit status 4 when a check fails.
+.TP
+.B watcher [\-\-foreground] [\-\-once] [\-\-poll\-interval=\fIseconds\fR] [\-\-poll\-timeout=\fIseconds\fR] [\-\-force]
+Wait for the quorate state, then run the post-quorate hooks.
+Without
+.B \-\-foreground
+the watcher daemonises itself (fork/setsid) and the command returns
+immediately; systemd and
+.B sballd-wrapper
+use
+.BR \-\-foreground .
+.B \-\-once
+polls a single time and exits without an error when the node is not quorate
+yet, which is convenient for cron and for tests.
+Exit status 5 means another watcher already holds the lock, exit status 6 means
+the poll timeout expired.
+.TP
+.B version [\-\-json]
+Print the version, commit and build date.
+.TP
+.B help
+Show the command overview.
+.SH GLOBAL OPTIONS
+.TP
+.BI \-\-root= dir
+Installation root used to resolve
+.IR /etc/sball-addition " and " /var/lib/sball-addition .
+Defaults to the
+.B SBALL_ADDITION_ROOT
+environment variable or
+.IR / .
+.TP
+.BI \-\-config= file
+Configuration file, default
+.IR <root>/etc/sball-addition/sball-addition.conf .
+.TP
+.BI \-\-log\-level= level
+Overrides
+.BR general.log_level
+(debug, info, warn, error).
+.TP
+.BI \-\-log\-file= file
+Overrides the log destination.
+.TP
+.BI \-\-socket= host:port
+Overrides the PVM XML-RPC socket.
+.TP
+.B \-\-no\-log
+Do not write to the log file (useful for read only invocations).
+.SH HOOKS
+A hook is an executable script whose header describes it:
+.PP
+.nf
+.RS
+#!/bin/bash
+### BEGIN SBALL-ADDITION INFO
+# HOOK: post-quorate
+# NAME: register-monitoring
+# DESCRIPTION: Register node in monitoring system
+# TIMEOUT: 60
+# RETRY: 2
+# RETRY_BACKOFF: 5
+# ON_FAIL: continue
+# RUN_ONCE: false
+# AFTER: network-check
+# TARGET: local
+# ENABLED: true
+### END SBALL-ADDITION INFO
+.RE
+.fi
+.PP
+Fields:
+.TP
+.B HOOK
+required,
+.I pre\-quorate
+or
+.IR post\-quorate .
+.TP
+.B NAME
+required, unique inside the phase, used by
+.BR run ,
+.BR enable " and " uninstall\-hook .
+.TP
+.B TIMEOUT
+seconds before the hook is SIGTERMed (SIGKILL after 5 more seconds). Defaults
+to
+.BR general.default_timeout .
+.TP
+.B RETRY / RETRY_BACKOFF
+extra attempts and the delay between them.
+.TP
+.B ON_FAIL
+.IR abort
+stops the phase (and, for pre-quorate, the service start) when the hook fails
+after all retries;
+.I continue
+logs the failure and carries on.
+.TP
+.B RUN_ONCE
+when
+.IR true ,
+a marker is written to
+.I /var/lib/sball-addition/state/<phase>/<name>.state
+and the hook is skipped on later runs unless
+.B \-\-force
+is used.
+.TP
+.B AFTER
+name of a hook in the same phase that must run first. Missing names and cycles
+are configuration errors.
+.TP
+.B TARGET
+.IR local
+(this node),
+.I master
+(only when this node is the cluster master) or
+.I all
+(every node; in the current MVP every node simply runs its own copy).
+.TP
+.B ENABLED
+.IR true " or " false .
+.PP
+The runner exports the following variables to every hook: SBALL_HOOK_PHASE,
+SBALL_HOOK_NAME, SBALL_HOSTNAME, SBALL_MASTER_ID, SBALL_IS_MASTER,
+SBALL_QUORATE_STATE, SBALL_LOG_FILE, SBALL_HOOK_PATH, SBALL_HOOK_DIR,
+SBALL_STATE_DIR, SBALL_STATE_FILE, SBALL_RUNTIME_DIR, SBALL_COMMON_LIB,
+SBALL_RUN_ID, SBALL_RETRY_ATTEMPT, SBALL_RETRY_MAX and
+SBALL_ADDITION_VERSION.
+.PP
+Sourcing
+.I /etc/sball-addition/lib/common.sh
+provides
+.BR sball_info ", " sball_warn ", " sball_error ", " sball_retry ", " sball_run ,
+.BR sball_require " and friends."
+.SH CONFIGURATION
+.I /etc/sball-addition/sball-addition.conf
+.PP
+.nf
+.RS
+[general]
+log_level = info
+log_file = /var/log/sball-addition/sball-addition.log
+socket_host = 127.0.0.1
+socket_port = 7090
+default_timeout = 60
+
+[pre-quorate]
+enabled = true
+on_failure = abort
+continue_on_empty = true
+
+[post-quorate]
+enabled = true
+poll_interval_seconds = 2
+poll_timeout_seconds = 300
+on_failure = continue
+.RE
+.fi
+.PP
+The file is optional; the values above are the built-in defaults.
+.SH EXIT STATUS
+.TP
+.B 0
+success
+.TP
+.B 1
+a hook failed or a phase was aborted
+.TP
+.B 2
+usage error
+.TP
+.B 3
+configuration missing or invalid
+.TP
+.B 4
+hook not found, hook set invalid, validation failure
+.TP
+.B 5
+another watcher already runs on this node (lock held)
+.TP
+.B 6
+the quorate poll timeout expired
+.SH FILES
+.TP
+.I /etc/sball-addition/sball-addition.conf
+Configuration.
+.TP
+.I /etc/sball-addition/hooks.d/pre-quorate.d/
+Pre-quorate hooks.
+.TP
+.I /etc/sball-addition/hooks.d/post-quorate.d/
+Post-quorate hooks.
+.TP
+.I /etc/sball-addition/lib/common.sh
+Helper library for hooks.
+.TP
+.I /var/lib/sball-addition/state/<phase>/<name>.state
+RUN_ONCE markers.
+.TP
+.I /var/lib/sball-addition/runtime/{watcher.pid,watcher.lock,last-run.json}
+Watcher pid file, watcher lock and the last outcome per hook.
+.TP
+.I /var/log/sball-addition/sball-addition.log
+JSON log (rotated with
+.BR logrotate (8),
+the watcher reopens it on SIGHUP).
+.SH ENVIRONMENT
+.TP
+.B SBALL_ADDITION_ROOT
+Alternative installation root.
+.TP
+.B SBALL_ADDITION_{LOG_LEVEL,LOG_FILE,SOCKET_HOST,SOCKET_PORT}
+Overrides for the configuration file.
+.TP
+.B SBALLD_BIN
+Real daemon used by the wrapper (default
+.I /usr/sbin/sballd.real
+when present, else
+.IR /usr/sbin/sballd ).
+.TP
+.B SBALL_ADDITION_BIN
+CLI used by the wrapper (default
+.IR /usr/bin/sball-addition ).
+.TP
+.B SBALL_ADDITION_WRAPPER_ARGS
+Extra CLI arguments for the wrapper, e.g.
+.IR "\-\-log\-level=debug" .
+.TP
+.B SBALL_ADDITION_REQUIRED
+When set to 1 the wrapper refuses to start sballd if the CLI is missing
+(default: fail open).
+.TP
+.B SBALL_ADDITION_SKIP_WRAPPER
+When set to 1 the wrapper starts sballd without running any hook (emergency
+switch).
+.SH EXAMPLES
+Show the installed hooks:
+.PP
+.RS
+sball-addition list
+.RE
+.PP
+Run one hook now and ignore its RUN_ONCE marker:
+.PP
+.RS
+sball-addition run register-monitoring \-\-force
+.RE
+.PP
+Watch the log of the post-quorate phase:
+.PP
+.RS
+sball-addition log \-\-phase=post-quorate \-\-follow \-\-pretty
+.RE
+.PP
+Find every failed hook execution of the last hour:
+.PP
+.RS
+sball-addition log \-\-since=1h | jq -c 'select(.event=="fail")'
+.RE
+.PP
+Wait for quorate in a script without starting a service:
+.PP
+.RS
+sball-addition watcher \-\-once || echo "not quorate yet"
+.RE
+.SH SEE ALSO
+.BR jq (1),
+.BR logrotate (8),
+.BR systemctl (1),
+.BR systemd.service (5)
+.PP
+The project README documents the wrapper, the RPM and the integration modes.

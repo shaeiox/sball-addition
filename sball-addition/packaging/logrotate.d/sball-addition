@@ -1,0 +1,15 @@
+/var/log/sball-addition/sball-addition.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root root
+    sharedscripts
+    postrotate
+        # The watcher reopens the log file on SIGHUP; transient failures are
+        # fine (the service may simply not be running).
+        /usr/bin/systemctl kill -s HUP --kill-who=main sball-addition-watcher.service >/dev/null 2>&1 || true
+    endscript
+}

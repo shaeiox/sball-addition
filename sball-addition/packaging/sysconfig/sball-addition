@@ -1,0 +1,26 @@
+# Environment for sballd-wrapper and sball-addition-watcher.service.
+# Installed as /etc/sysconfig/sball-addition (read with EnvironmentFile=-).
+
+# Path of the real daemon when the wrapper is used as a shim
+# (/usr/sbin/sballd.real is auto-detected; set this only for exotic layouts).
+#SBALLD_BIN=/usr/sbin/sballd.real
+
+# Extra CLI arguments for the wrapper, e.g. a stricter log level.
+#SBALL_ADDITION_WRAPPER_ARGS=--log-level=debug
+
+# Set to 1 to refuse to start sballd when the sball-addition CLI is missing
+# (default 0 = fail open, the service still starts).
+#SBALL_ADDITION_REQUIRED=0
+
+# Emergency switch: set to 1 to start sballd without running any hook.
+#SBALL_ADDITION_SKIP_WRAPPER=0
+
+# Values handed to hooks (optional, sample hooks read them):
+#SBALL_STORAGE_MOUNT=/var/lib/pvm-storage
+#SBALL_STORAGE_DEVICE=/dev/mapper/pvm-storage
+#SBALL_MASTER_HOST=172.16.40.248
+#SBALL_MONITORING_URL=https://monitoring.example.net/api/pvm/register
+#SBALL_MONITORING_TOKEN=changeme
+#SBALL_NOTIFY_URL=https://chat.example.net/hooks/pvm
+#SBALL_REQUIRED_PATHS=/etc/sball:/var/lib/pvm-storage
+#SBALL_MIN_FREE_MB=5120

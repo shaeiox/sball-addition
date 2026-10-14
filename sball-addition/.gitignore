@@ -1,0 +1,6 @@
+bin/
+release/
+coverage.out
+*.test
+*.rpm
+*.tar.gz

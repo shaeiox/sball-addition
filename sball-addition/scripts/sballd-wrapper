@@ -1,0 +1,141 @@
+#!/bin/bash
+#
+# sballd-wrapper - hook aware wrapper around the PVM service daemon.
+#
+# The wrapper is what makes the "pre-quorate" phase possible: it runs the
+# pre-quorate hooks, starts the post-quorate watcher and only then hands the
+# process over to the real sballd (exec, so the pid and the signal handling of
+# the service unit stay exactly the same as before).
+#
+# Installation (see README, "Installation"):
+#   A) systemd   - point sballd.service's ExecStart at this wrapper
+#                  (packaging/systemd/sballd.service.d/sball-addition.conf)
+#   B) shim      - rename the real daemon to /usr/sbin/sballd.real and install
+#                  this wrapper as /usr/sbin/sballd, which also covers starts
+#                  that bypass systemd (e.g. "pvm-wrapper --start").
+#
+# Environment variables:
+#   SBALLD_BIN                    real daemon (default /usr/sbin/sballd.real,
+#                                 falling back to /usr/sbin/sballd)
+#   SBALL_ADDITION_BIN            CLI binary (default /usr/bin/sball-addition)
+#   SBALL_ADDITION_WRAPPER_ARGS   extra CLI arguments, e.g. "--log-level=debug"
+#   SBALL_ADDITION_REQUIRED=1     abort when the CLI is missing (default: fail open)
+#   SBALL_ADDITION_SKIP_WRAPPER=1 emergency bypass of the whole hook system
+#
+# Exit codes: 0 on a successful hand-over, otherwise the exit code of the failed
+# pre-quorate phase (or 1 when the wrapper itself refuses to start sballd).
+
+set -uo pipefail
+
+SBALL_ADDITION_BIN="${SBALL_ADDITION_BIN:-/usr/bin/sball-addition}"
+SBALL_ADDITION_LOG="${SBALL_ADDITION_LOG:-/var/log/sball-addition/sball-addition.log}"
+WATCHER_UNIT="sball-addition-watcher.service"
+WRAPPER_TAG="sballd-wrapper"
+
+if [[ -z "${SBALLD_BIN:-}" ]]; then
+    if [[ -x /usr/sbin/sballd.real ]]; then
+        SBALLD_BIN=/usr/sbin/sballd.real
+    else
+        SBALLD_BIN=/usr/sbin/sballd
+    fi
+fi
+
+log() {
+    local level=$1
+    shift
+    local message=$*
+    printf '%s: %s: %s\n' "$WRAPPER_TAG" "$level" "$message" >&2
+    if command -v logger >/dev/null 2>&1; then
+        logger -t "$WRAPPER_TAG" -p "daemon.${level}" -- "$message" 2>/dev/null || true
+    fi
+}
+
+# Split optional extra CLI arguments without tripping over "set -u".
+extra_args=()
+if [[ -n "${SBALL_ADDITION_WRAPPER_ARGS:-}" ]]; then
+    read -r -a extra_args <<<"$SBALL_ADDITION_WRAPPER_ARGS"
+fi
+
+cli() { "$SBALL_ADDITION_BIN" "$@" ${extra_args[@]+"${extra_args[@]}"}; }
+
+if [[ "${SBALL_ADDITION_SKIP_WRAPPER:-0}" == "1" ]]; then
+    log notice "SBALL_ADDITION_SKIP_WRAPPER=1: starting ${SBALLD_BIN} without hooks"
+    exec "$SBALLD_BIN" "$@"
+fi
+
+if [[ ! -x "$SBALL_ADDITION_BIN" ]]; then
+    if [[ "${SBALL_ADDITION_REQUIRED:-0}" == "1" ]]; then
+        log err "${SBALL_ADDITION_BIN} is missing and SBALL_ADDITION_REQUIRED=1: refusing to start sballd"
+        exit 1
+    fi
+    log warning "${SBALL_ADDITION_BIN} is missing: starting ${SBALLD_BIN} without hooks"
+    exec "$SBALLD_BIN" "$@"
+fi
+
+# --------------------------------------------------------------------------
+# 1) pre-quorate hooks
+# --------------------------------------------------------------------------
+log info "running pre-quorate hooks"
+if cli run-phase pre-quorate; then
+    log info "pre-quorate phase finished"
+else
+    rc=$?
+    # Exit code policy (see README, "Fail open"):
+    #   1  a hook failed with ON_FAIL=abort and 6  the phase ran too long
+    #      -> the start is aborted, the node must not join half configured;
+    #   2/3/4  the hook system itself is broken (usage/config/invalid hooks)
+    #      -> warn and start anyway, a broken hook must never brick a host.
+    # SBALL_ADDITION_REQUIRED=1 makes every error fatal.
+    case "$rc" in
+        1)
+            log err "pre-quorate hooks failed (exit 1): aborting the sballd start"
+            log err "fix or disable the failing hook, or remove ON_FAIL=abort; log: ${SBALL_ADDITION_LOG}"
+            exit "$rc"
+            ;;
+        6)
+            log err "pre-quorate phase timed out: aborting the sballd start (log: ${SBALL_ADDITION_LOG})"
+            exit "$rc"
+            ;;
+        *)
+            if [[ "${SBALL_ADDITION_REQUIRED:-0}" == "1" ]]; then
+                log err "sball-addition exited ${rc} and SBALL_ADDITION_REQUIRED=1: aborting the sballd start"
+                exit "$rc"
+            fi
+            log warning "sball-addition could not run the pre-quorate phase (exit ${rc}); starting sballd anyway, see ${SBALL_ADDITION_LOG}"
+            ;;
+    esac
+fi
+
+# --------------------------------------------------------------------------
+# 2) post-quorate watcher
+# --------------------------------------------------------------------------
+# When the systemd unit is enabled it owns the watcher lifecycle; otherwise the
+# wrapper spawns it. Both paths use the same lock, so only one ever runs.
+watcher_started=0
+if command -v systemctl >/dev/null 2>&1 &&
+    systemctl is-enabled "$WATCHER_UNIT" >/dev/null 2>&1; then
+    log info "${WATCHER_UNIT} is enabled: systemd keeps the watcher alive"
+    watcher_started=1
+else
+    if out=$(cli watcher 2>&1); then
+        log info "${out:-watcher started}"
+        watcher_started=1
+    else
+        log warning "could not start the post-quorate watcher: ${out:-unknown error}"
+    fi
+fi
+
+if ((watcher_started == 0)); then
+    log warning "post-quorate hooks will not run until a watcher is started (sball-addition watcher)"
+fi
+
+# --------------------------------------------------------------------------
+# 3) hand over to the real service
+# --------------------------------------------------------------------------
+if [[ ! -x "$SBALLD_BIN" ]]; then
+    log err "${SBALLD_BIN} is not executable: cannot start the PVM service"
+    exit 1
+fi
+
+log info "starting ${SBALLD_BIN} $*"
+exec "$SBALLD_BIN" "$@"

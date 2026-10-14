@@ -1,0 +1,25 @@
+[Unit]
+Description=sball-addition quorate watcher
+Documentation=man:sball-addition(8)
+After=sballd.service
+Wants=sballd.service
+ConditionPathExists=/usr/bin/sball-addition
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/sysconfig/sball-addition
+ExecStart=/usr/bin/sball-addition watcher --foreground
+# The watcher exits 1 when it cannot reach quorate before
+# post-quorate.poll_timeout_seconds; systemd then retries with a fresh poll
+# window, which also covers sballd restarts.
+Restart=on-failure
+RestartSec=5
+# The watcher kills hook process groups on stop, so give it a moment.
+KillMode=mixed
+TimeoutStopSec=30
+# The watcher only needs to reach the local PVM socket and write state/runtime
+# files; it does not need to spawn VMs itself.
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

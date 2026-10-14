@@ -1,0 +1,21 @@
+# Reference copy of the PVM service unit as shipped by CloudAvid.
+#
+# sball-addition does NOT replace it: the ExecStart override is delivered as the
+# drop-in packaging/systemd/sballd.service.d/sball-addition.conf, which keeps
+# future PVM updates of this file intact.
+[Unit]
+Description=sballd - PVM cluster service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/sysconfig/sball
+ExecStart=/usr/sbin/sballd
+Restart=on-failure
+RestartSec=5
+KillMode=process
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
