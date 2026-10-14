@@ -11,10 +11,9 @@
 #
 # The resulting package installs the same tree as the RPM:
 #   /usr/bin/sball-addition, /usr/bin/sballd-wrapper, /usr/bin/sball-node-verify,
-#   /usr/bin/sball-rollout, /usr/sbin/sballd-wrapper,
+#   /usr/bin/sball-rollout, /usr/bin/sball-integration, /usr/sbin/sballd-wrapper,
 #   /etc/sball-addition/{sball-addition.conf,lib/common.sh,hooks.d/...},
 #   /etc/sysconfig/sball-addition, /etc/logrotate.d/sball-addition,
-#   /etc/systemd/system/sballd.service.d/sball-addition.conf,
 #   /usr/lib/systemd/system/sball-addition-watcher.service (+ -metrics.{service,timer}),
 #   /var/lib/sball-addition/{state,runtime}, /var/log/sball-addition
 set -euo pipefail
@@ -78,7 +77,6 @@ echo "staging into $STAGE"
 install -d "$STAGE/DEBIAN" \
     "$STAGE/usr/bin" "$STAGE/usr/sbin" \
     "$STAGE/usr/lib/systemd/system" \
-    "$STAGE/etc/systemd/system/sballd.service.d" \
     "$STAGE/etc/sball-addition/hooks.d/pre-quorate.d" \
     "$STAGE/etc/sball-addition/hooks.d/post-quorate.d" \
     "$STAGE/etc/sball-addition/lib" \
@@ -95,6 +93,7 @@ install -m 0755 "$SRC/scripts/sballd-wrapper"       "$STAGE/usr/bin/sballd-wrapp
 install -m 0755 "$SRC/scripts/sballd-wrapper"       "$STAGE/usr/sbin/sballd-wrapper"
 install -m 0755 "$SRC/scripts/verify-node.sh"       "$STAGE/usr/bin/sball-node-verify"
 install -m 0755 "$SRC/scripts/rollout.sh"           "$STAGE/usr/bin/sball-rollout"
+install -m 0755 "$SRC/scripts/sballd-integration.sh" "$STAGE/usr/bin/sball-integration"
 
 install -m 0644 "$SRC/etc/sball-addition.conf"      "$STAGE/etc/sball-addition/sball-addition.conf"
 install -m 0644 "$SRC/lib/common.sh"                "$STAGE/etc/sball-addition/lib/common.sh"
@@ -106,8 +105,6 @@ for hook in "$SRC"/hooks/post-quorate.d/*.sh; do
 done
 install -m 0644 "$SRC/packaging/sysconfig/sball-addition"     "$STAGE/etc/sysconfig/sball-addition"
 install -m 0644 "$SRC/packaging/logrotate.d/sball-addition"   "$STAGE/etc/logrotate.d/sball-addition"
-install -m 0644 "$SRC/packaging/systemd/sballd.service.d/sball-addition.conf" \
-    "$STAGE/etc/systemd/system/sballd.service.d/sball-addition.conf"
 install -m 0644 "$SRC/packaging/systemd/sball-addition-watcher.service" \
     "$STAGE/usr/lib/systemd/system/sball-addition-watcher.service"
 install -m 0644 "$SRC/packaging/systemd/sball-addition-metrics.service" \
@@ -115,7 +112,7 @@ install -m 0644 "$SRC/packaging/systemd/sball-addition-metrics.service" \
 install -m 0644 "$SRC/packaging/systemd/sball-addition-metrics.timer" \
     "$STAGE/usr/lib/systemd/system/sball-addition-metrics.timer"
 install -d "$STAGE/usr/share/man/man8"
-for page in sball-addition sballd-wrapper sball-node-verify sball-rollout; do
+for page in sball-addition sballd-wrapper sball-node-verify sball-rollout sball-integration; do
     install -m 0644 "$SRC/docs/$page.8" "$STAGE/usr/share/doc/sball-addition/$page.8"
     # -n keeps the gzip header free of a timestamp (reproducible packages)
     gzip -9n -c "$SRC/docs/$page.8" >"$STAGE/usr/share/man/man8/$page.8.gz"
@@ -147,8 +144,11 @@ Description: managed hook system for the sballd (PVM) service
  logging, timeouts, retries, RUN_ONCE markers, cluster aware targets, a node
  acceptance checker, a cluster rollout tool and a Prometheus exporter.
  .
- The package does not modify sballd.service: the ExecStart override is a
- conffile you can delete to get back to a plain daemon start.
+ The package never starts, stops, restarts, enables, disables or reconfigures
+ sballd.service and installs no file that belongs to it. Running the hooks at
+ service start is an explicit administrator decision (sball-integration apply,
+ which writes the ExecStart drop-in and tells you which systemctl command to
+ run); everything else works read-only.
 EOF
 
 # conffiles: everything dpkg must not silently overwrite on upgrades
@@ -163,7 +163,6 @@ EOF
     done
     echo /etc/sysconfig/sball-addition
     echo /etc/logrotate.d/sball-addition
-    echo /etc/systemd/system/sballd.service.d/sball-addition.conf
 } >"$STAGE/DEBIAN/conffiles"
 
 # md5sums for every file (dpkg verifies them; lintian complains otherwise)

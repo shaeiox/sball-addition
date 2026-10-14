@@ -1,0 +1,142 @@
+.\" sball-integration manual page
+.TH SBALL-INTEGRATION 8 "2026-10-14" "sball-addition 1.0.0" "System Administration"
+.SH NAME
+sball-integration \- wire (or unwire) the sball-addition hook wrapper into the sballd service
+.SH SYNOPSIS
+.B sball-integration
+.RI [ status | apply | remove ]
+.RI [ \-\-mode= dropin | shim ]
+.RI [ \-\-dry\-run ]
+.RI [ \-\-yes ]
+.RI [ \-\-root= dir ]
+.SH DESCRIPTION
+The rule this command exists for:
+.B sball-addition never touches
+.BR sballd.service .
+No installer, package, rollout, unit or daemon of this project starts, stops,
+restarts, enables, disables or reconfigures the PVM service, and none of them
+writes a unit file, drop-in or binary that belongs to it.
+.PP
+Hooks therefore do not run at start until an administrator decides that they
+should, and that decision is made with
+.BR sball-integration .
+It is the only component of the project that writes a file belonging to the
+service, and it is only ever run by hand. It writes the file and prints the
+.BR systemctl (1)
+command
+.B you
+have to run; it does not call
+.B systemctl
+itself.
+.PP
+Until it is applied, the rest of the project works read-only: it polls the PVM
+socket, reports state, exports metrics and runs hooks on demand with
+.BR "sball-addition run\-phase" .
+.SH ACTIONS
+.TP
+.B status
+Report whether the drop-in or the shim is applied, and what an administrator
+would have to do next. Exit status 0 when something is applied, 1 when nothing
+is.
+.TP
+.B apply
+Write the integration (see
+.BR \-\-mode ).
+The file is written atomically and refuses to overwrite a foreign file without
+.BR \-\-yes .
+.TP
+.B remove
+Undo it: delete the drop-in, or restore the real daemon and delete the wrapper
+copy. The change takes effect at the next start of the daemon \(em reloading and
+restarting stays with you.
+.SH OPTIONS
+.TP
+.B \-\-mode=dropin
+Default. Write
+.I /etc/systemd/system/sballd.service.d/sball-addition.conf
+with an empty
+.B ExecStart
+followed by
+.BR "ExecStart=/usr/bin/sballd-wrapper" .
+The drop-in leaves the vendor unit file untouched, survives PVM updates and is
+reverted by deleting one file.
+.TP
+.B \-\-mode=shim
+Move
+.I /usr/sbin/sballd
+to
+.I /usr/sbin/sballd.real
+and install the wrapper as
+.I /usr/sbin/sballd
+instead. Use this when starts bypass systemd (for example
+.BR "pvm-wrapper \-\-start" ).
+It is a larger change: the wrapper is now in the path of every start.
+.TP
+.B \-\-print
+Print the drop-in on stdout and change nothing. Useful for configuration
+management that distributes the file itself.
+.TP
+.B \-\-dry\-run
+Show what would change, including the file content, and execute nothing.
+.TP
+.B \-\-yes
+Skip safety prompts: overwrite a differing drop-in, or apply the shim without
+the confirmation.
+.TP
+.BI \-\-root= dir
+Treat
+.I dir
+as the filesystem root (tests, chroots, recovery environments).
+.TP
+.BI \-\-prefix= dir
+Prefix for the
+.I /usr
+paths (defaults to the root).
+.SH AFTER APPLYING
+The hooks run the next time the daemon starts, and only then. Sequence that keeps
+a node safe:
+.PP
+.RS 4
+sball-addition validate
+.br
+sball-addition run-phase pre-quorate \-\-dry-run
+.br
+sball-node-verify \-\-smoke
+.br
+sball-integration apply
+.br
+systemctl daemon-reload && systemctl restart sballd.service   \fI(your call, your moment)\fR
+.br
+sball-addition watcher \-\-once && sball-addition status
+.RE
+.SH EXIT STATUS
+.TP
+.B 0
+success; for
+.B status
+it means the integration is applied
+.TP
+.B 1
+.B status
+only: nothing is applied
+.TP
+.B 2
+usage error, or a refusal (a differing file without
+.BR \-\-yes ,
+no wrapper installed)
+.SH FILES
+.TP
+.I /etc/systemd/system/sballd.service.d/sball-addition.conf
+The drop-in written by
+.BR "apply \-\-mode=dropin" .
+.TP
+.I /usr/sbin/sballd.real
+The preserved daemon when
+.B \-\-mode=shim
+was used.
+.SH SEE ALSO
+.BR sball-addition (8),
+.BR sballd-wrapper (8),
+.BR sball-node-verify (8),
+.BR sball-rollout (8),
+.BR systemctl (1)

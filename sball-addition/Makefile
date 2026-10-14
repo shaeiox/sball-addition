@@ -33,12 +33,13 @@ BIN       := bin/$(NAME)
 DIST      := release
 INSTALL_ARGS ?=
 
-.PHONY: all modes build fmt vet unit integration test cover clean install install-systemd uninstall tarball rpm deb bundle spec-verify hooks-check man-check help
+.PHONY: all modes build fmt vet unit integration test cover clean install install-systemd uninstall tarball rpm deb bundle spec-verify hooks-check man-check contract-check help
 
 all: build
 
 modes: ## restore the executable bits (after a copy/zip that dropped them)
 	@chmod +x scripts/*.sh scripts/sballd-wrapper 2>/dev/null || true
+	@chmod +x packaging/debian/build-deb.sh 2>/dev/null || true
 	@chmod +x test/integration/run.sh test/integration/fake-pvm.py 2>/dev/null || true
 	@chmod +x docs/hook-template.sh lib/common.sh 2>/dev/null || true
 	@chmod +x hooks/pre-quorate.d/*.sh hooks/post-quorate.d/*.sh 2>/dev/null || true
@@ -60,7 +61,10 @@ unit: ## unit tests
 integration: build modes ## end-to-end tests with a fake PVM socket
 	./test/integration/run.sh
 
-test: vet unit man-check integration ## everything
+contract-check: modes ## prove that sballd.service is never touched (static checks)
+	@./scripts/contract-check.sh
+
+test: vet contract-check unit man-check integration ## everything
 
 cover: ## unit tests with coverage
 	$(GO) test ./... -coverprofile=coverage.out -count=1
@@ -90,15 +94,15 @@ tarball: build modes ## build a distributable tarball
 	@STAGE=$(DIST)/$(NAME)-$(VERSION); \
 	rm -rf "$$STAGE"; \
 	for d in bin etc lib scripts docs hooks/pre-quorate.d hooks/post-quorate.d \
-	         packaging/systemd/sballd.service.d packaging/logrotate.d packaging/sysconfig \
+	         packaging/systemd packaging/logrotate.d packaging/sysconfig \
 	         packaging/debian deploy/ansible test/integration; do mkdir -p "$$STAGE/$$d"; done; \
 	cp -a $(BIN) "$$STAGE/bin/"; \
 	cp -a etc/sball-addition.conf "$$STAGE/etc/"; \
 	cp -a lib/common.sh "$$STAGE/lib/"; \
 	cp -a scripts/sballd-wrapper scripts/install.sh scripts/uninstall.sh \
-	      scripts/verify-node.sh scripts/rollout.sh "$$STAGE/scripts/"; \
+	      scripts/verify-node.sh scripts/rollout.sh scripts/sballd-integration.sh \
+	      "$$STAGE/scripts/"; \
 	cp -a packaging/systemd/*.service packaging/systemd/*.timer "$$STAGE/packaging/systemd/"; \
-	cp -a packaging/systemd/sballd.service.d "$$STAGE/packaging/systemd/"; \
 	cp -a packaging/logrotate.d/sball-addition "$$STAGE/packaging/logrotate.d/"; \
 	cp -a packaging/sysconfig/sball-addition "$$STAGE/packaging/sysconfig/"; \
 	cp -a packaging/$(NAME).spec packaging/deploy-notes.txt "$$STAGE/packaging/"; \

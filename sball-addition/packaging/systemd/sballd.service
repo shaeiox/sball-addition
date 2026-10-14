@@ -1,8 +1,11 @@
-# Reference copy of the PVM service unit as shipped by CloudAvid.
+# Reference copy of the PVM service unit as shipped by CloudAvid. It exists so
+# that you can see what the daemon looks like; sball-addition never installs it,
+# never overwrites it and never edits it.
 #
-# sball-addition does NOT replace it: the ExecStart override is delivered as the
-# drop-in packaging/systemd/sballd.service.d/sball-addition.conf, which keeps
-# future PVM updates of this file intact.
+# If (and only if) an administrator decides that the pre-quorate hooks should run
+# at every start, "sball-integration apply" writes the drop-in
+# /etc/systemd/system/sballd.service.d/sball-addition.conf, which overrides
+# ExecStart for the next start without touching this vendor file.
 [Unit]
 Description=sballd - PVM cluster service
 After=network-online.target

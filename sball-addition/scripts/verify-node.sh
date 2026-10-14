@@ -17,6 +17,9 @@
 # Checks: binary, configuration, hooks, wrapper, systemd wiring, watcher,
 # log directory/file, state/runtime permissions, ownership, PVM socket, what the
 # pre-quorate phase would run (--dry-run) and optionally a real hook round trip.
+#
+# Everything here is read-only: this verifier never starts, stops or restarts
+# sballd.service. It only reports whether the wrapper is wired into it.
 set -uo pipefail
 
 ROOT="${SBALL_ADDITION_ROOT:-/}"
@@ -123,6 +126,12 @@ section() {
     ((QUIET)) || printf '\n\033[1m%s\033[0m\n' "$1"
 }
 
+note() { # a plain hint line, never a check
+    ((AS_JSON)) && return 0
+    ((QUIET)) && return 0
+    printf '       %s\n' "$*"
+}
+
 cli() { "$BIN" --root="$ROOT" "$@"; }
 
 # ------------------------------------------------------------- 1. binary ----
@@ -148,15 +157,15 @@ else
     fail "wrapper" "no sballd-wrapper under $PREFIX/usr/{bin,sbin}"
 fi
 
-# the shim (optional, covers starts that bypass systemd)
+# the shim (optional, only when an operator applied it on purpose)
 if [[ -f "$PREFIX/usr/sbin/sballd" ]] && grep -q "sballd-wrapper" "$PREFIX/usr/sbin/sballd" 2>/dev/null; then
     if [[ -x "$PREFIX/usr/sbin/sballd.real" ]]; then
-        ok "shim" "/usr/sbin/sballd is the wrapper, real daemon at /usr/sbin/sballd.real"
+        ok "shim" "/usr/sbin/sballd is the wrapper, real daemon at /usr/sbin/sballd.real; sballd.service still starts where you start it"
     else
         fail "shim" "/usr/sbin/sballd is the wrapper but /usr/sbin/sballd.real is missing - the service cannot start"
     fi
-else
-    warn "shim" "no shim installed: starts that bypass systemd (pvm --start) run without hooks"
+elif [[ -f "$PREFIX/usr/sbin/sballd.real" ]]; then
+    warn "shim" "/usr/sbin/sballd.real exists but /usr/sbin/sballd is not the wrapper (half applied; 'sball-integration remove' cleans it up)"
 fi
 
 # -------------------------------------------------------- 2. configuration ---
@@ -222,14 +231,17 @@ fi
 # ------------------------------------------------------------- 3. systemd ----
 section "systemd wiring"
 if [[ "$ROOT" == "/" ]] && command -v systemctl >/dev/null 2>&1; then
-    if [[ -f "$DROPIN" ]]; then
-        if systemctl cat sballd.service 2>/dev/null | grep -q 'sballd-wrapper'; then
-            ok "sballd.service" "ExecStart points at the wrapper"
-        else
-            warn "sballd.service" "$DROPIN exists but systemctl does not report the wrapper - run: systemctl daemon-reload"
-        fi
+    # Read-only: the unit files on disk, never "systemctl cat" and never any
+    # command that could change the state of sballd.service.
+    if grep -q 'sballd-wrapper' "$DROPIN" 2>/dev/null; then
+        ok "sballd.service" "starts the hooks through the wrapper (drop-in applied)"
+    elif [[ -f "$DROPIN" ]]; then
+        warn "sballd.service" "$DROPIN exists but does not point at the wrapper"
+    elif grep -q 'sballd-wrapper' "$PREFIX/usr/sbin/sballd" 2>/dev/null; then
+        ok "sballd.service" "starts the wrapper through the /usr/sbin/sballd shim"
     else
-        fail "sballd.service" "no ExecStart override at $DROPIN - the hooks will never run"
+        ok "sballd.service" "left alone (default): hooks do not run at start yet, sballd.service is untouched"
+        note "to change that: sball-integration apply   (then restart the service yourself)"
     fi
 
     if [[ -f "$UNIT_DIR/$WATCHER_UNIT" ]]; then

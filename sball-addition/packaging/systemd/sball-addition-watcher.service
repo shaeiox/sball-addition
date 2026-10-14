@@ -1,8 +1,12 @@
 [Unit]
 Description=sball-addition quorate watcher
 Documentation=man:sball-addition(8)
-After=sballd.service
-Wants=sballd.service
+# No After=/Wants=/Requires= on sballd.service, on purpose: this project must
+# never start, stop or restart the PVM service. The watcher polls the PVM
+# socket and follows whatever the daemon does - it does not drive it. (A
+# "Wants=sballd.service" here would make systemd start the daemon whenever the
+# watcher starts, which is exactly what we promise never to do.)
+After=network.target
 ConditionPathExists=/usr/bin/sball-addition
 
 [Service]
@@ -11,7 +15,7 @@ EnvironmentFile=-/etc/sysconfig/sball-addition
 ExecStart=/usr/bin/sball-addition watcher --foreground
 # The watcher exits 1 when it cannot reach quorate before
 # post-quorate.poll_timeout_seconds; systemd then retries with a fresh poll
-# window, which also covers sballd restarts.
+# window, which also covers daemon restarts done by the operator.
 Restart=on-failure
 RestartSec=5
 # The watcher kills hook process groups on stop, so give it a moment.

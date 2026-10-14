@@ -31,6 +31,7 @@ Highlights:
 1. [Quick start](#quick-start)
 2. [How it works](#how-it-works)
 3. [Installation](#installation)
+3b. [What sball-addition never does](#what-sball-addition-never-does)
 4. [Configuration](#configuration)
 5. [Writing hooks](#writing-hooks)
 6. [CLI reference](#cli-reference)
@@ -47,29 +48,47 @@ Highlights:
 
 ## Quick start
 
+> **`sballd.service` is never touched by this project.** No installer, package,
+> rollout, unit or daemon of sball-addition ever starts, stops, restarts, enables
+> or reconfigures the PVM service, and none of them writes a unit file, drop-in
+> or binary that belongs to it. Installing it cannot interrupt your VMs or your
+> quorum. See [What sball-addition never does](#what-sball-addition-never-does).
+
 > Rolling this out on a live cluster? Read **[PRODUCTION.md](PRODUCTION.md)** -
 > build the release bundle, gate every node with `sball-node-verify`, and let
-> `sball-rollout` restart one node at a time, master last, waiting for quorate in
-> between.
+> `sball-rollout` walk the cluster one node at a time, master last, waiting for
+> quorate in between.
 
 ```console
 # one command installation (binary, wrapper, config, samples, systemd units)
 sudo ./scripts/install.sh --with-systemd
 
-# look at what was installed
+# look at what was installed (nothing of sballd was touched)
 sball-addition list
+sball-addition status
+sball-addition run-phase pre-quorate --dry-run
 
-# wire sballd.service to the wrapper and restart the service
-sudo systemctl daemon-reload
-sudo systemctl restart sballd.service
-
-# keep the post-quorate watcher alive across daemon restarts
+# keep the post-quorate watcher alive across daemon restarts (ours, not theirs)
 sudo systemctl enable --now sball-addition-watcher.service
 
 # watch it work
-sball-addition status
 sball-addition log --follow --pretty
 ```
+
+Hooks then run whenever *you* start the daemon through the wrapper. Wiring that
+up is one explicit command that writes the file and tells you the restart line -
+it does not run it for you:
+
+```console
+sudo sball-integration apply
+#   wrote /etc/systemd/system/sballd.service.d/sball-addition.conf
+#   sball-addition does not restart services. To activate it, run:
+#     systemctl daemon-reload && systemctl restart sballd.service
+```
+
+Until you do that, everything works read-only: the tool observes the PVM socket,
+reports the node state, exports metrics and runs hooks on demand
+(`sball-addition run-phase pre-quorate|post-quorate`).
 
 Without an installation you can try everything inside a throw-away root:
 
@@ -89,7 +108,8 @@ make build
                        systemd (sballd.service)
                                  |
                                  v
-                     /usr/bin/sballd-wrapper          <-- ExecStart (drop-in)
+                     /usr/bin/sballd-wrapper   <-- ExecStart, only if an admin ran
+                                                        "sball-integration apply"
                                  |
               +------------------+-------------------+
               |                                      |
@@ -99,8 +119,9 @@ make build
       OK -----+                                      |  poll socket every 2s
               |                                quorate?  --> run-phase post-quorate
               v                                      v
-        exec /usr/sbin/sballd.real            post-quorate.d/ hooks
-              (the real daemon, same pid)
+        exec /usr/sbin/sballd                  post-quorate.d/ hooks
+           (the vendor binary, untouched,
+            same pid as the wrapper)
 ```
 
 * **Pre-quorate** runs in the foreground of the service start. A hook with
@@ -108,8 +129,10 @@ make build
   non-zero, so systemd reports a failed start and `sballd` is never executed –
   the node stays out of the cluster instead of joining half configured.
 * **Post-quorate** runs in the watcher, which is *not* part of the daemon
-  process. That keeps `sballd` untouched and lets the hooks run even when the
-  daemon takes minutes to join the cluster.
+  process and has no systemd relationship to it. That keeps `sballd` untouched
+  and lets the hooks run even when the daemon takes minutes to join the cluster.
+* **Without the integration** the top of that picture simply does not exist: the
+  daemon starts as it always did and the tool only watches it.
 * The watcher takes an `flock` on
   `/var/lib/sball-addition/runtime/watcher.lock`, so the copy spawned by the
   wrapper, the systemd unit and manual runs can never execute hooks twice.
@@ -140,13 +163,17 @@ error fatal; `SBALL_ADDITION_SKIP_WRAPPER=1` bypasses all hooks in an emergency.
 ```console
 sudo ./scripts/install.sh [options]
 
-  --with-systemd      install the watcher unit and the sballd.service drop-in
+  --with-systemd      install the watcher/metrics units (never a unit or
+                      drop-in for sballd.service)
   --enable-service    also enable + start the watcher unit
-  --shim-sballd       also wrap /usr/sbin/sballd itself (see below)
   --with-samples      force the sample hooks (default: only when a phase dir is empty)
   --no-samples        never install sample hooks
   --force             overwrite the existing configuration/samples
   --root=DIR          install into DIR (tests, containers, chroots)
+  --prefix=DIR        where /etc,/var,/usr go (default $root); with --root=/ it
+                      keeps the systemd integration of the real system while
+                      every file lands in DIR - how the contract test proves the
+                      installer does not touch sballd
 ```
 
 The script is idempotent, keeps an existing configuration (saving the old one as
@@ -170,32 +197,66 @@ overrides (static Go binary, direct `systemctl` calls).
 
 ### Choosing how `sballd` is started
 
-PVM starts its daemon in two different ways, and you probably want to cover both.
+Hooks run at start because the daemon is started *through* the wrapper. That
+wiring is never done for you; `sball-integration` does it when you ask, and it
+never restarts anything. PVM starts its daemon in two different ways, and you may
+want to cover both.
 
-**A. systemd (default)** – point the unit at the wrapper:
+**A. drop-in (systemd, the recommended mode)**
+
+```console
+sudo sball-integration apply --mode=dropin     # writes the file, prints the rest
+sudo systemctl daemon-reload && sudo systemctl restart sballd.service   # your call
+```
 
 ```ini
-# /etc/systemd/system/sballd.service.d/sball-addition.conf  (installed for you)
+# /etc/systemd/system/sballd.service.d/sball-addition.conf  (written by the command above)
 [Service]
 ExecStart=
 ExecStart=/usr/bin/sballd-wrapper
 ```
 
-```console
-sudo systemctl daemon-reload && sudo systemctl restart sballd.service
-```
+The vendor unit file is untouched, so PVM updates keep working, and undo is
+`sudo sball-integration remove`.
 
-**B. shim (covers `pvm-wrapper --start` and manual starts)** – `pvm --start`
-executes `/usr/sbin/sballd -r` directly, which bypasses systemd and therefore the
-wrapper. The shim moves the real binary aside and puts the wrapper in its place:
+**B. shim (covers `pvm-wrapper --start` and manual starts)**
+
+`pvm --start` executes `/usr/sbin/sballd -r` directly, which bypasses systemd and
+therefore the wrapper. The shim moves the real binary aside and puts the wrapper
+in its place:
 
 ```console
-sudo ./scripts/install.sh --shim-sballd
+sudo sball-integration apply --mode=shim --yes
 # /usr/sbin/sballd      -> wrapper
 # /usr/sbin/sballd.real -> the original daemon (auto-detected by the wrapper)
 ```
 
 Use A, B or both; the lock and the phase state are shared, so nothing runs twice.
+In both cases the change takes effect at the **next** start of the daemon:
+
+```console
+sball-integration status      # exit 0 = wired in, 1 = not wired in
+```
+
+### What sball-addition never does
+
+This is a design rule, enforced by the tests, not a preference:
+
+| Never | Why it matters |
+|-------|----------------|
+| `systemctl start/stop/restart/reload/enable/disable sballd.service` | a restart drops the node out of the cluster; only the operator knows when that is acceptable |
+| installing a unit file, drop-in or binary for the daemon | an install must be a no-op for the running service (upgrades included) |
+| `After=`/`Wants=`/`Requires=` on `sballd.service` in our units | `Wants=` would make systemd *start* the daemon as a side effect of enabling our watcher |
+| moving or replacing `/usr/sbin/sballd` at install time | with the bare installer, the daemon stays byte-identical |
+| reloading systemd on behalf of the service | a pending drop-in would otherwise activate silently |
+
+What it *does* do is read-only: query the PVM socket, look at the process table
+(`sball_addition_sballd_up`), read our own state and log, and run hooks when the
+phase or the watcher says so. `--dry-run` and `sball-node-verify` follow the same
+rule. The single, deliberate exception is `sball-integration`: run by hand, it
+writes the drop-in (or the shim) and prints the `systemctl` line for you to run.
+`make test` greps the whole tree to prove that nothing else references the
+service in a command.
 
 ### Manual layout
 
@@ -204,7 +265,8 @@ Use A, B or both; the lock and the phase state are shared, so nothing runs twice
 | `/usr/bin/sball-addition` | the CLI/binary |
 | `/usr/bin/sballd-wrapper`, `/usr/sbin/sballd-wrapper` | the service wrapper |
 | `/usr/lib/systemd/system/sball-addition-watcher.service` | watcher unit |
-| `/etc/systemd/system/sballd.service.d/sball-addition.conf` | ExecStart override |
+| `/usr/bin/sball-integration` | the only component that writes a sballd file (run by hand) |
+| `/etc/systemd/system/sballd.service.d/sball-addition.conf` | ExecStart override — **only when `sball-integration apply` was run** |
 | `/etc/sball-addition/…` | configuration, hooks, helper library |
 | `/var/lib/sball-addition/…` | state (RUN_ONCE) and runtime files |
 | `/var/log/sball-addition/sball-addition.log` | JSON log |
@@ -484,10 +546,18 @@ sball-addition run sync-config --force
 sball-addition watcher --once || echo "node is not quorate yet"
 ```
 
-**Emergency bypass**
+**Emergency bypass** (you are starting the daemon; the tool only stays out of the way)
 
 ```console
 SBALL_ADDITION_SKIP_WRAPPER=1 systemctl start sballd.service
+```
+
+**Detach the hooks from the start path** (the daemon keeps running)
+
+```console
+sudo sball-integration remove       # drops the drop-in / restores the shim
+# if you were using the drop-in, it takes effect at the next start:
+#   systemctl daemon-reload && systemctl restart sballd.service
 ```
 
 **Uninstall**
@@ -571,23 +641,28 @@ sball-addition run-phase pre-quorate --dry-run
 sball-addition run-phase post-quorate --dry-run --json
 sball-rollout --nodes=nodes.txt --rpm="$RPM" --dry-run
 
-# 3. canary node
+# 3. canary node (nothing here restarts sballd)
 scp "$RPM" root@node3:/root/
 ssh root@node3 'rpm -Uvh /root/sball-addition-*.rpm && systemctl daemon-reload &&
                 sball-addition validate && sball-node-verify --smoke &&
-                systemctl restart sballd.service && sball-addition watcher --once &&
+                sball-addition watcher --once &&
                 systemctl enable --now sball-addition-watcher.service'
 
 # 4. the rest of the cluster: one node at a time, master last, quorum safe
 sudo sball-rollout --nodes=nodes.txt --rpm="$RPM" --maintenance="CHG-12345" --smoke
+
+# 5. when *you* want the daemon restarted, it is one line per node - and the
+#    same line enables the hooks if you applied the integration
+ssh root@node3 'systemctl restart sballd.service'
 ```
 
-Two helpers are installed with the package:
+Three helpers are installed with the package:
 
 | Command | Purpose |
 |---------|---------|
 | `sball-node-verify [--smoke] [--json] [--root=DIR]` | per-node acceptance gate: binary, config, hooks, permissions, wrapper, systemd wiring, watcher, log, socket, what the pre-quorate phase would run, and (with `--smoke`) a real hook round trip. Exit 1 = do not restart this node. |
-| `sball-rollout` | cluster rollout over ssh: installs the artifact, validates, restarts `sballd`, waits for quorate, verifies, then goes to the next node. Workers first, master last; stops on the first failure; `--dry-run`/`--list` first, always. |
+| `sball-rollout` | cluster rollout over ssh: installs the artifact, validates, waits for quorate, verifies, then goes to the next node. It never restarts `sballd`. Workers first, master last; stops on the first failure; `--dry-run`/`--list` first, always. |
+| `sball-integration [status\|apply\|remove] [--mode=dropin\|shim]` | the only component that writes a file belonging to the service (the `ExecStart` drop-in, or the `/usr/sbin/sballd` shim). Run by hand; it prints the `systemctl` line for you instead of restarting anything. `status` exits 0 when applied. |
 | `sball-addition metrics` | Prometheus text exposition of the node and hook state (`--out` for node_exporter's textfile collector). Shipped as a `sball-addition-metrics.timer` that runs once a minute. |
 
 Operational guarantees built into the tooling:
@@ -600,9 +675,11 @@ Operational guarantees built into the tooling:
 * **Nothing is hidden** – every decision ends up in the JSON log, and
   `sball-node-verify` fails loudly on a group/world writable hook (hooks run as
   root).
+* **The service is out of scope** – nothing here restarts `sballd`; the hooks
+  attach to a start you perform, and detaching is `sball-integration remove`.
 * **Rollback is trivial** – `SBALL_ADDITION_SKIP_WRAPPER=1 systemctl start
-  sballd.service` for one start, `rm /etc/systemd/system/sballd.service.d/sball-addition.conf
-  && systemctl daemon-reload` for good, `scripts/uninstall.sh` for everything.
+  sballd.service` for one start, `sball-integration remove && systemctl
+  daemon-reload` for good, `scripts/uninstall.sh` for everything.
 
 Ansible users get a template playbook in `deploy/ansible/sball-addition.yml`
 (`serial: 1` + the node verifier as the gate).
@@ -613,9 +690,9 @@ Ansible users get a template playbook in `deploy/ansible/sball-addition.yml`
 
 | Job | What it proves |
 |-----|----------------|
-| `lint` | `gofmt`, `go vet`, `shellcheck -S warning` over every script and every man page rendering with `groff` |
+| `lint` | `gofmt`, `go vet`, `shellcheck -S warning` over every script, every man page rendering with `groff`, and `make contract-check` |
 | `unit` | `go test -race ./...` |
-| `integration` | the full `make test` suite: 147 assertions against a real sandboxed install, a fake PVM socket and a simulated cluster (fake `ssh`/`scp`), no root needed |
+| `integration` | the full `make test` suite: 181 assertions against a real sandboxed install, a fake PVM socket, a simulated cluster (fake `ssh`/`scp`) and a recording `systemctl` (proving no program ever addresses `sballd`), no root needed |
 | `packages` | `make bundle`, `sha256sum -c SHA256SUMS`, `lintian --fail-on error,warning`, install the DEB into a throw-away root and run it, check the RPM file list |
 
 The whole suite is self-contained: no network, no systemd, no root, no PVM
@@ -630,7 +707,7 @@ docker run --rm -v "$PWD:/src" -w /src golang:1.23-bookworm \
 
 | Symptom | Likely cause / fix |
 |---------|--------------------|
-| `hooks` never run and `status` says `sballd PID: 0` | the wrapper is not used: check `systemctl cat sballd.service` for the `ExecStart` override, or install the shim (`--shim-sballd`). |
+| `hooks` never run at start and `status` says `sballd PID: 0` | the integration is not applied (by design, it never is by itself): `sball-integration status`, then `sudo sball-integration apply` and restart the daemon when it suits you. |
 | `Watcher: not running` | `systemctl status sball-addition-watcher`; run `sball-addition watcher --foreground` to see the reason. Exit 5 means another watcher holds the lock. |
 | Hooks do not run although the node is quorate | the socket query must see *this* node: compare `sballd-wrapper` hostname with `pvm --stat`; the runner matches the short hostname (and falls back to interface IPs). |
 | `sballd` does not start any more | a pre-quorate hook failed with `ON_FAIL: abort` – read `sball-addition log --level=error`, or start with `SBALL_ADDITION_SKIP_WRAPPER=1`. |
@@ -663,6 +740,7 @@ docker run --rm -v "$PWD:/src" -w /src golang:1.23-bookworm \
 | safe production rollout | `scripts/verify-node.sh`, `scripts/rollout.sh`; integration section 17b (fake cluster: master last, waits for quorate, stops on failure) |
 | `--dry-run` executes nothing | `internal/runner` (no `exec` on the dry-run path); integration section 17b (marker file proof) |
 | Prometheus metrics | `internal/metrics`, `sball-addition metrics`; integration section 17c + unit tests (windows, omissions, escaping) |
+| `sballd.service` is never touched | `scripts/contract-check.sh` (static, part of `make test`) + integration section 17d (behavioural: every program re-run with a recording `systemctl`); the only writer, `sball-integration`, is hand-run and prints the restart line |
 | packaged and continuously tested | `make bundle` (tarball + RPM + DEB + `SHA256SUMS`), `packaging/debian` (lintian clean), `.github/workflows/ci.yml` |
 
 Unit tests additionally cover the header parser, ordering (including cycles and

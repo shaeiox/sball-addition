@@ -2,15 +2,23 @@
 # Template playbook for rolling sball-addition out with Ansible.
 #
 # It does what "sball-rollout" does locally, using native Ansible modules and
-# therefore proper serialisation: `serial: 1` restarts one node at a time and
-# waits for the post-quorate hooks before moving on.
+# therefore proper serialisation: `serial: 1` walks the cluster one node at a
+# time and waits for the post-quorate hooks before moving on.
 #
 #   ansible-playbook -i inventory deploy/ansible/sball-addition.yml \
 #       -e install_rpm=/root/sball-addition-1.0.0-1.x86_64.rpm
 #
+# The play never starts, stops, restarts or reconfigures sballd.service: the
+# service lifecycle belongs to whoever is on call. It installs the files,
+# validates the hook set, waits for the node to be quorate and verifies it. If
+# your maintenance window does include a daemon restart, flip
+# `restart_sballd: true` (it is off by default and it is your decision - the
+# variable only exists as a reminder that this is an operator action, and the
+# restart is the last thing that happens on the node, after it verified clean).
+#
 # Adjust `serial`, the hook files and the group names to your cluster. The
 # verifier step is the gate: the play fails on a node that is not ready instead
-# of restarting a broken sballd.
+# of leaving a half configured node behind.
 - name: Deploy sball-addition to the PVM cluster
   hosts: pvm_cluster
   become: true
@@ -19,7 +27,7 @@
   vars:
     install_rpm: ""         # e.g. /root/sball-addition-1.0.0-1.x86_64.rpm
     install_tarball: ""     # or a tarball, mutually exclusive with install_rpm
-    restart_sballd: true
+    restart_sballd: false    # the operator restarts the daemon, not the playbook
     wait_quorate_seconds: 300
     hook_source_dir: ""     # optional: a local directory with your own hooks
     monitoring_url: ""
@@ -98,28 +106,29 @@
       ansible.builtin.command: sball-addition run-phase pre-quorate --dry-run
       changed_when: false
 
-    - name: Reload systemd and restart the service
+    - name: Verify the node (gate - never continue past a broken node)
+      ansible.builtin.command: sball-node-verify --quiet
+      changed_when: false
+
+    - name: Wait for the node to be quorate (observation only, no restart)
+      ansible.builtin.command: sball-addition watcher --once
+      register: quorate
+      until: quorate.rc == 0
+      retries: "{{ (wait_quorate_seconds | int / 5) | int }}"
+      delay: 5
+      changed_when: false
+
+    # ONLY when an operator asked for it (restart_sballd: true). sballd.service
+    # is not touched by anything else in this play, and even here the restart is
+    # the very last step, after the node verified clean.
+    - name: Restart sballd.service
       when: restart_sballd | bool
-      block:
-        - name: Verify the node before restarting it
-          ansible.builtin.command: sball-node-verify --quiet
-          changed_when: false
+      ansible.builtin.systemd_service:
+        name: sballd.service
+        state: restarted
+      notify: note the operator restart
 
-        - name: Restart sballd
-          ansible.builtin.systemd_service:
-            name: sballd.service
-            state: restarted
-            daemon_reload: true
-
-        - name: Wait for the node to become quorate
-          ansible.builtin.command: sball-addition watcher --once
-          register: quorate
-          until: quorate.rc == 0
-          retries: "{{ (wait_quorate_seconds | int / 5) | int }}"
-          delay: 5
-          changed_when: false
-
-    - name: Keep the post-quorate watcher running
+    - name: Keep the post-quorate watcher running (our own unit only)
       ansible.builtin.systemd_service:
         name: sball-addition-watcher.service
         enabled: true
@@ -134,3 +143,10 @@
     - name: Report
       ansible.builtin.debug:
         msg: "{{ inventory_hostname }}: {{ verify.stdout_lines | last }}"
+
+  handlers:
+    - name: note the operator restart
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: sballd was restarted because restart_sballd
+          was set. sball-addition never does this on its own.

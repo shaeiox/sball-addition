@@ -44,9 +44,11 @@ hook and configuration permissions: a group or world writable hook is a
 failure, because hooks execute as root
 .TP
 \(bu
-systemd wiring: the
+systemd wiring: whether the wrapper is wired into
 .I sballd.service
-drop-in, the watcher unit and whether it is enabled and active
+(read-only: the unit files on disk, never
+.BR "systemctl cat" )
+and whether the watcher unit is enabled and active
 .TP
 \(bu
 a running watcher process (unit or wrapper spawned)
@@ -92,8 +94,9 @@ Prefix of the program paths (default: the root).
 .SH EXIT STATUS
 .TP
 .B 0
-healthy (warnings are allowed, for example a missing shim or a socket that is
-unreachable because the service is intentionally down)
+healthy (warnings are allowed, for example a socket that is unreachable because
+the service is intentionally down, or a node where the integration was
+deliberately not applied)
 .TP
 .B 1
 at least one check failed: do not restart this node yet
@@ -122,4 +125,5 @@ sball-node-verify \-\-root=/tmp/stage
 .BR sball-addition (8),
 .BR sball-rollout (8),
 .BR sballd-wrapper (8),
+.BR sball-integration (8),
 .BR systemctl (1)

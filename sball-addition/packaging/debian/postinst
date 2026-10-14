@@ -1,9 +1,9 @@
 #!/bin/sh
 # postinst - runs after (re)installing sball-addition.
 #
-# It only reloads systemd so the shipped units and the sballd.service drop-in
-# are known. Nothing is started or enabled automatically: an operator decides
-# when the service may be restarted.
+# It only reloads systemd so the shipped sball-addition units are known. Nothing
+# of sballd.service is installed, started, stopped or reconfigured here: the
+# hook system observes the daemon and only runs hooks when asked to.
 set -e
 
 case "$1" in
@@ -21,14 +21,20 @@ sball-addition installed.
      verify them with:  sball-addition validate && sball-addition list
      check the node:    sball-node-verify --smoke
 
-  2. run the pre/post hooks with the service (the ExecStart drop-in is in
-     place, so a restart is enough):
-       systemctl daemon-reload && systemctl restart sballd.service
+  2. run hooks on demand, without touching the service:
+       sball-addition run-phase pre-quorate
+       sball-addition run-phase post-quorate
 
-  3. keep the post-quorate watcher alive across sballd restarts:
+  3. run the hooks with the service (OPTIONAL, and your decision - this package
+     does not do it for you; nothing is written for sballd.service until you
+     ask for it):
+       sball-integration status
+       sball-integration apply     # then reload + restart sballd yourself
+
+  4. keep the post-quorate watcher alive across daemon restarts:
        systemctl enable --now sball-addition-watcher.service
 
-  4. optional Prometheus metrics (node_exporter textfile collector):
+  5. optional Prometheus metrics (node_exporter textfile collector):
        echo 'SBALL_METRICS_ARGS=--out /var/lib/node_exporter/textfile_collector/sball-addition.prom' \
            >> /etc/sysconfig/sball-addition
        systemctl enable --now sball-addition-metrics.timer

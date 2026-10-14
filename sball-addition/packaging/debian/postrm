@@ -5,9 +5,17 @@ set -e
 
 case "$1" in
     remove|purge)
-        # Drop the ExecStart override so sballd starts the plain daemon again.
-        rm -f /etc/systemd/system/sballd.service.d/sball-addition.conf
-        rmdir /etc/systemd/system/sballd.service.d 2>/dev/null || true
+        # If (and only if) an administrator applied the ExecStart drop-in, take
+        # it away: leaving it would point the service at a wrapper that this
+        # removal deletes. sballd.service is not stopped, started or restarted
+        # here - that stays with the operator.
+        if [ -f /etc/systemd/system/sballd.service.d/sball-addition.conf ]; then
+            rm -f /etc/systemd/system/sballd.service.d/sball-addition.conf
+            rmdir /etc/systemd/system/sballd.service.d 2>/dev/null || true
+            echo "sball-addition: removed the sballd ExecStart drop-in."
+            echo "sball-addition: run \"systemctl daemon-reload && systemctl restart sballd.service\""
+            echo "sball-addition: when it suits you - sball-addition never restarts sballd itself."
+        fi
         if command -v systemctl >/dev/null 2>&1; then
             systemctl daemon-reload >/dev/null 2>&1 || true
         fi

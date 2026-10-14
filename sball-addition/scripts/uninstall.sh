@@ -32,7 +32,7 @@ options:
   --keep-hooks      keep the hook scripts (implies --keep-config)
   --keep-state      keep /var/lib/sball-addition (state + runtime)
   --keep-logs       keep /var/log/sball-addition
-  --keep-services   do not touch systemd units or the sballd.service drop-in
+  --keep-services   keep our systemd units and the sballd drop-in, if applied
   --dry-run         only print what would be removed
   -v, --verbose     verbose output
   -h, --help        this help
@@ -84,8 +84,8 @@ ROOT="${ROOT%/}"
 PREFIX="${PREFIX%/}"
 [[ -z "$ROOT" ]] && ROOT=/
 [[ -z "$PREFIX" ]] && PREFIX=/
-p() {
-    if [[ "$ROOT" == "/" ]]; then printf '%s' "$1"; else printf '%s%s' "$ROOT" "$1"; fi
+p() { # same semantics as install.sh: PREFIX wins, and defaults to ROOT
+    printf '%s%s' "$PREFIX" "$1"
 }
 
 BIN_DIR="$PREFIX/usr/bin"
@@ -113,16 +113,15 @@ if ((KEEP_SERVICES == 0)); then
     rm_if_exists "$UNIT_FILE" || info "no watcher unit at $UNIT_FILE"
     rm_if_exists "$(p "/usr/lib/systemd/system/sball-addition-metrics.service")" || true
     rm_if_exists "$(p "/usr/lib/systemd/system/sball-addition-metrics.timer")" || true
+    # The drop-in only exists when an operator ran "sball-integration apply":
+    # it is ours, so removing it is part of the uninstall.
     if rm_if_exists "$DROPIN"; then
-        info "removed $DROPIN (sballd.service starts the plain daemon again after daemon-reload)"
+        info "removed $DROPIN"
+        warn "sballd.service still runs through the wrapper until you reload and"
+        warn "restart it yourself; this uninstaller never touches the daemon:"
+        warn "  systemctl daemon-reload && systemctl restart sballd.service"
     else
         info "no sballd drop-in at $DROPIN"
-    fi
-    if [[ "$ROOT" == "/" ]] && command -v systemctl >/dev/null 2>&1; then
-        run systemctl daemon-reload || true
-        if systemctl is-active --quiet sballd.service 2>/dev/null; then
-            warn "sballd.service is running through the wrapper; restart it to drop the wrapper"
-        fi
     fi
 fi
 
@@ -211,7 +210,7 @@ for page in sball-addition sballd-wrapper sball-node-verify sball-rollout; do
         [[ -e "$man" ]] && leftovers+=("$man")
     done
 done
-if [[ "$ROOT" == "/" ]]; then
+if [[ "$ROOT" == "/" && "$PREFIX" == "/" ]]; then
     for extra in /etc/sball-addition /var/lib/sball-addition /var/log/sball-addition \
         /etc/systemd/system/sballd.service.d/sball-addition.conf; do
         [[ -e "$extra" ]] && ! printf '%s\n' "${leftovers[@]:-}" | grep -qx "$extra" && leftovers+=("$extra")

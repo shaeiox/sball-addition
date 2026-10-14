@@ -31,6 +31,8 @@ jobs:
             docs/hook-template.sh test/integration/run.sh
       - name: man pages render
         run: make man-check
+      - name: sballd.service is never touched (static contract check)
+        run: make contract-check
 
   # ---------------------------------------------------------------- unit ----
   unit:
@@ -58,7 +60,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq jq gettext-base python3 curl
       - name: make test
-        # go vet + unit tests + man-check + the 147 assertion integration suite
+        # go vet + contract check + unit tests + man-check + the integration suite
+        # (181 assertions; the 17d section re-runs every program with a recording
+        #  systemctl in PATH and proves none of them ever mentions sballd)
         # (runs entirely inside a throw-away root, no root privileges needed)
         run: make test
       - name: upload the integration log on failure

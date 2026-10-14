@@ -32,9 +32,16 @@ validate), a wrapper for the service unit, a quorate watcher, JSON logging,
 timeouts, retries, RUN_ONCE markers and cluster aware targets (local, master,
 all).
 
-The package is self contained: it needs no external service and no changes to
-the PVM installation beyond pointing sballd.service at the wrapper (a systemd
-drop-in is shipped, but not enabled automatically).
+The package is self contained and treats the service as read-only: it never
+starts, stops, restarts or reconfigures sballd.service, and it installs no unit
+file, drop-in or binary that belongs to it. Hooks run when the daemon is started
+through the wrapper, which is an administrator decision:
+
+    sball-integration apply     # write the ExecStart drop-in (then reload/restart)
+    sball-integration status    # show whether it is applied
+
+Until that is done everything stays observational: the tool polls the PVM
+socket, reports the node state and runs hooks on demand.
 
 %prep
 %setup -q
@@ -53,6 +60,7 @@ install -m 0755 bin/sball-addition       %{buildroot}%{_bindir}/sball-addition
 install -m 0755 scripts/sballd-wrapper   %{buildroot}%{_bindir}/sballd-wrapper
 install -m 0755 scripts/verify-node.sh   %{buildroot}%{_bindir}/sball-node-verify
 install -m 0755 scripts/rollout.sh       %{buildroot}%{_bindir}/sball-rollout
+install -m 0755 scripts/sballd-integration.sh %{buildroot}%{_bindir}/sball-integration
 install -m 0755 scripts/sballd-wrapper   %{buildroot}%{_sbindir}/sballd-wrapper
 
 install -d %{buildroot}%{_sysconfdir}/sball-addition/hooks.d/pre-quorate.d
@@ -79,15 +87,13 @@ install -m 0644 packaging/systemd/sball-addition-metrics.service \
     %{buildroot}%{_unitdir}/sball-addition-metrics.service
 install -m 0644 packaging/systemd/sball-addition-metrics.timer \
     %{buildroot}%{_unitdir}/sball-addition-metrics.timer
-install -d %{buildroot}%{_sysconfdir}/systemd/system/sballd.service.d
-install -m 0644 packaging/systemd/sballd.service.d/sball-addition.conf \
-    %{buildroot}%{_sysconfdir}/systemd/system/sballd.service.d/sball-addition.conf
 
 install -d %{buildroot}%{_mandir}/man8
 install -m 0644 docs/sball-addition.8     %{buildroot}%{_mandir}/man8/sball-addition.8
 install -m 0644 docs/sballd-wrapper.8     %{buildroot}%{_mandir}/man8/sballd-wrapper.8
 install -m 0644 docs/sball-node-verify.8  %{buildroot}%{_mandir}/man8/sball-node-verify.8
 install -m 0644 docs/sball-rollout.8      %{buildroot}%{_mandir}/man8/sball-rollout.8
+install -m 0644 docs/sball-integration.8  %{buildroot}%{_mandir}/man8/sball-integration.8
 
 install -d %{buildroot}%{_sysconfdir}/logrotate.d
 install -m 0644 packaging/logrotate.d/sball-addition \
@@ -108,14 +114,17 @@ sball-addition installed.
      verify them with:  sball-addition validate && sball-addition list
      check the node with:  sball-node-verify --smoke
 
-  2. run the pre/post hooks with the service (systemd drop-in is in place):
-       systemctl daemon-reload && systemctl restart sballd.service
+  2. run hooks on demand, without touching the service:
+       sball-addition run-phase pre-quorate
+       sball-addition run-phase post-quorate
 
-  3. keep the post-quorate watcher alive across sballd restarts:
+  3. run the hooks with the service (OPTIONAL, your decision - the package does
+     not do this for you; it writes no file for sballd.service until you ask):
+       sball-integration status
+       sball-integration apply      # then: systemctl daemon-reload && systemctl restart sballd.service
+
+  4. keep the post-quorate watcher alive across daemon restarts:
        systemctl enable --now sball-addition-watcher.service
-
-  4. starts that bypass systemd (pvm-wrapper --start) can be covered too:
-       ./scripts/install.sh --shim-sballd
 
   5. optional Prometheus metrics (node_exporter textfile collector):
        echo 'SBALL_METRICS_ARGS=--out /var/lib/node_exporter/textfile_collector/sball-addition.prom' \
@@ -131,9 +140,22 @@ EOF
 if [ $1 -eq 0 ]; then
     systemctl stop sball-addition-watcher.service >/dev/null 2>&1 || :
     systemctl disable sball-addition-watcher.service >/dev/null 2>&1 || :
-    # Remove the ExecStart override so sballd starts the plain daemon again.
-    rm -f %{_sysconfdir}/systemd/system/sballd.service.d/sball-addition.conf
-    rmdir %{_sysconfdir}/systemd/system/sballd.service.d 2>/dev/null || :
+    # If (and only if) an administrator applied the ExecStart drop-in, take it
+    # away again: leaving it would point the service at a wrapper that the next
+    # command removes. sballd.service itself is not started, stopped or
+    # restarted here - reloading is the administrator's step.
+    if [ -f %{_sysconfdir}/systemd/system/sballd.service.d/sball-addition.conf ]; then
+        rm -f %{_sysconfdir}/systemd/system/sballd.service.d/sball-addition.conf
+        rmdir %{_sysconfdir}/systemd/system/sballd.service.d 2>/dev/null || :
+        cat <<'EON'
+
+The sballd ExecStart drop-in was removed because sball-addition is going away.
+sballd.service is still running the wrapper in memory - run
+"systemctl daemon-reload && systemctl restart sballd.service" when it suits you;
+sball-addition never restarts the daemon itself.
+
+EON
+    fi
     systemctl daemon-reload >/dev/null 2>&1 || :
 fi
 
@@ -151,6 +173,7 @@ fi
 %{_bindir}/sballd-wrapper
 %{_bindir}/sball-node-verify
 %{_bindir}/sball-rollout
+%{_bindir}/sball-integration
 %{_sbindir}/sballd-wrapper
 %dir %{_sysconfdir}/sball-addition
 %dir %{_sysconfdir}/sball-addition/hooks.d
@@ -163,7 +186,6 @@ fi
 %{_sysconfdir}/sball-addition/lib/common.sh
 %config(noreplace) %{_sysconfdir}/sysconfig/sball-addition
 %config(noreplace) %{_sysconfdir}/logrotate.d/sball-addition
-%config(noreplace) %{_sysconfdir}/systemd/system/sballd.service.d/sball-addition.conf
 %{_unitdir}/sball-addition-watcher.service
 %{_unitdir}/sball-addition-metrics.service
 %{_unitdir}/sball-addition-metrics.timer
@@ -171,6 +193,7 @@ fi
 %{_mandir}/man8/sballd-wrapper.8*
 %{_mandir}/man8/sball-node-verify.8*
 %{_mandir}/man8/sball-rollout.8*
+%{_mandir}/man8/sball-integration.8*
 %doc README.md PRODUCTION.md docs/hook-template.sh
 %dir %{_localstatedir}/lib/sball-addition
 %dir %{_localstatedir}/lib/sball-addition/state

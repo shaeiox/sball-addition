@@ -17,6 +17,13 @@ Verify before you ship anything to production
 --------------------------------------------
   sha256sum -c SHA256SUMS
 
+What this tool never does
+-------------------------
+  It never starts, stops, restarts, enables, disables or reconfigures
+  sballd.service, and it installs no unit file, drop-in or binary that belongs
+  to the daemon. Installing it cannot interrupt your VMs or your quorum.
+  Restarting sballd - at any point, including after an install - is your action.
+
 Install on one node (canary)
 ----------------------------
   # RPM (recommended on RHEL/CentOS)
@@ -34,13 +41,26 @@ Then, on every node
 -------------------
   1. check the hooks that would run:   sball-addition list
                                        sball-addition run-phase pre-quorate --dry-run
-  2. gate the restart:                 sball-node-verify --smoke
-  3. restart the service:              systemctl restart sballd.service
-  4. confirm quorate:                  sball-addition watcher --once && pvm --stat
-  5. keep the watcher alive:           systemctl enable --now sball-addition-watcher.service
+  2. gate the node:                    sball-node-verify --smoke
+  3. keep the watcher alive:           systemctl enable --now sball-addition-watcher.service
+  4. run hooks without a restart:      sball-addition run-phase pre-quorate
+                                       sball-addition run-phase post-quorate
+
+Run the hooks at service start (OPTIONAL, your decision)
+-------------------------------------------------------
+  sball-integration status            # is the wrapper wired in?
+  sball-integration apply             # write the ExecStart drop-in
+  # then, when it suits your window:
+  systemctl daemon-reload && systemctl restart sballd.service
+
+  Nothing above happens automatically: sball-integration is the only part of
+  sball-addition that ever writes a file for the service, it is only run by
+  hand, and it prints the systemctl line instead of executing it.
 
 Roll out the cluster (one node at a time, master last, quorum safe)
 ------------------------------------------------------------------
+  The rollout installs, validates, waits for quorate and verifies. It does not
+  restart anything.
   sudo sball-rollout --nodes=nodes.txt --maintenance="CHG-xxxx" --dry-run
   sudo sball-rollout --nodes=nodes.txt --rpm=/root/sball-addition-${VERSION}-1.x86_64.rpm --smoke
 
@@ -49,8 +69,8 @@ Rollback
   # bypass all hooks for one start
   SBALL_ADDITION_SKIP_WRAPPER=1 systemctl start sballd.service
 
-  # back to a plain daemon
-  rm -f /etc/systemd/system/sballd.service.d/sball-addition.conf
+  # back to a plain daemon (drops the ExecStart drop-in, if it was applied)
+  sball-integration remove
   systemctl daemon-reload && systemctl restart sballd.service
 
   # remove the package (keeps hooks/state/logs)

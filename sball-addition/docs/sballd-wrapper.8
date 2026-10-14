@@ -13,6 +13,17 @@ as the entry point of the service unit
 .RB ( "
 ExecStart=/usr/bin/sballd-wrapper
 " ).
+It is installed but
+.B not wired in by anything automatic
+: installing sball-addition never modifies
+.BR sballd.service .
+An administrator attaches it with
+.BR "sball-integration apply" (8),
+which writes the drop-in (or installs the
+.I /usr/sbin/sballd
+shim) and prints the
+.B systemctl
+line; the restart itself is the operator's action.
 It runs the pre-quorate hooks, starts the post-quorate watcher and finally
 .BR exec s
 the real daemon with the original arguments, so the pid, the signal handling
@@ -62,7 +73,11 @@ Hooks executed before the daemon starts.
 .I /etc/systemd/system/sballd.service.d/sball-addition.conf
 The drop-in that points
 .B sballd.service
-at this wrapper.
+at this wrapper. It exists only when an administrator ran
+.BR "sball-integration apply" (8);
+by default
+.B sballd.service
+starts the plain daemon and this program is never executed.
 .SH EXAMPLES
 Start the service the way an upgrade or a reboot would:
 .PP
@@ -79,4 +94,5 @@ sball-addition run-phase pre-quorate \-\-dry-run
 .BR sball-addition (8),
 .BR sball-node-verify (8),
 .BR sball-rollout (8),
+.BR sball-integration (8),
 .BR systemd.service (5)

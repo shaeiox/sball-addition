@@ -378,7 +378,18 @@ When set to 1 the wrapper refuses to start sballd if the CLI is missing
 When set to 1 the wrapper starts sballd without running any hook (emergency
 switch).
 .SH PRODUCTION
-Two helper commands are installed next to
+.B sballd.service
+is never touched: no installer, package, rollout, unit or daemon of this project
+starts, stops, restarts, enables or reconfigures the PVM service, and none of
+them writes a unit file, drop-in or binary that belongs to it. Hooks run at start
+only after an administrator wires the wrapper in with
+.BR sball-integration (8),
+which writes the file and prints the
+.B systemctl
+line instead of executing it. Everything else works read-only: the PVM socket is
+polled, the node state is reported and hooks run on demand.
+.PP
+Three helper commands are installed next to
 .BR sball-addition :
 .TP
 .B sball-node-verify [\-\-smoke] [\-\-json] [\-\-root=\fIdir\fR]
@@ -392,9 +403,7 @@ restart this node yet".
 .B sball-rollout \-\-nodes=\fIfile\fR [\-\-rpm=\fIfile\fR|\-\-tarball=\fIfile\fR]
 Cluster rollout over ssh: copies and installs the artifact, runs
 .BR "sball-addition validate" ,
-restarts
-.BR sballd.service ,
-waits for the node to become quorate again
+waits for the node to be quorate
 .RB ( \-\-wait\-quorate ,
 default 300 s) and runs
 .BR sball-node-verify .
@@ -406,7 +415,21 @@ is given.
 .B \-\-dry\-run
 and
 .B \-\-list
-show the plan without executing anything.
+show the plan without executing anything. The command never restarts
+.BR sballd.service :
+the service lifecycle, and the moment for a restart, stay with the operator.
+.TP
+.B sball-integration status|apply|remove [\-\-mode=dropin|shim]
+The only component that writes a file belonging to the PVM service, and it is
+only ever run by hand: it writes the
+.B ExecStart
+drop-in (or installs the
+.I /usr/sbin/sballd
+shim), tells you which
+.B systemctl
+command to run and never runs it. Exit status 0 from
+.B status
+means the integration is applied.
 .PP
 See
 .I PRODUCTION.md

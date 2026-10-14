@@ -2,24 +2,29 @@
 #
 # rollout.sh - cluster rollout of sball-addition, one node at a time.
 #
-# Rolling a virtualisation cluster is mostly about quorum: restart sballd on too
-# many nodes at once and the cluster loses quorum and the VMs pay for it. This
-# script therefore
+# Rolling a virtualisation cluster is mostly about quorum: have sballd down on
+# too many nodes at once and the cluster loses quorum and the VMs pay for it. This
+# script therefore rolls one node at a time and never takes the service down
+# itself:
 #
 #   1. installs the artifact (optional),
 #   2. validates the hook configuration on the node,
-#   3. restarts sballd.service,
-#   4. waits until the node reports quorate again,
-#   5. verifies the installation (sball-node-verify),
+#   3. waits until the node reports quorate again,
+#   4. verifies the installation (sball-node-verify),
 #
 # and only then moves to the next node. Non-master nodes are rolled out first,
 # the master last, so the cluster always keeps its coordinator as long as the
 # remaining nodes are quorate.
 #
+# sballd.service is never started, stopped, restarted or reconfigured by this
+# tool. The service lifecycle stays with the operator: the rollout installs the
+# files, validates the hook set, waits for the node to be quorate again and
+# verifies it. Nothing else.
+#
 #   ./scripts/rollout.sh --list --nodes=nodes.txt
 #   ./scripts/rollout.sh --nodes=nodes.txt --rpm=release/sball-addition-1.0.0-1.x86_64.rpm
 #   ./scripts/rollout.sh --nodes=node1,node2,node3 --tarball=/root/sball-addition-1.0.0.tar.gz
-#   ./scripts/rollout.sh --local --no-restart          # rehearse on this host
+#   ./scripts/rollout.sh --local                       # rehearse on this host
 #
 # Always run it with --dry-run first: it prints the exact order and commands.
 set -uo pipefail
@@ -32,7 +37,6 @@ RPM_FILE=""
 TARBALL_FILE=""
 WAIT_QUORATE=300
 MASTER_LAST=1
-DO_RESTART=1
 RUN_VERIFY=1
 CONTINUE_ON_ERROR=0
 DRY_RUN=0
@@ -58,9 +62,9 @@ artifact (optional - skip to only restart/verify):
   --tarball=FILE    copy this tarball, extract it and run its scripts/install.sh
 
 behaviour:
-  --wait-quorate=N  seconds to wait for the node to become quorate (default 300)
+  --wait-quorate=N  seconds to wait for the node to be quorate again (default 300).
+                    This only observes the node: the restart itself is yours.
   --no-master-last  keep the given order exactly (default: master node last)
-  --no-restart      do not restart sballd.service (install/verify only)
   --no-verify       skip sball-node-verify at the end of each node
   --smoke           pass --smoke to sball-node-verify (runs a real hook)
   --continue-on-error  keep going after a node fails
@@ -92,7 +96,6 @@ for arg in "$@"; do
         --tarball=*) TARBALL_FILE="${arg#*=}" ;;
         --wait-quorate=*) WAIT_QUORATE="${arg#*=}" ;;
         --no-master-last) MASTER_LAST=0 ;;
-        --no-restart) DO_RESTART=0 ;;
         --no-verify) RUN_VERIFY=0 ;;
         --smoke) SMOKE=1 ;;
         --continue-on-error) CONTINUE_ON_ERROR=1 ;;
@@ -260,8 +263,8 @@ fi
 
 step "plan"
 info "nodes (in order): ${ORDER[*]}"
-info "artifact:        ${RPM_FILE:-${TARBALL_FILE:-none (install/verify/restart only)}}"
-info "restart sballd:  $([[ $DO_RESTART == 1 ]] && echo yes || echo no)"
+info "artifact:        ${RPM_FILE:-${TARBALL_FILE:-none (install/verify only)}}"
+info "restart sballd:  never (this tool does not touch the service)"
 info "wait quorate:    ${WAIT_QUORATE}s per node"
 info "verify:          $([[ $RUN_VERIFY == 1 ]] && echo yes || echo no)$([[ $SMOKE == 1 ]] && echo ' (+ smoke test)')"
 info "dry run:         $([[ $DRY_RUN == 1 ]] && echo yes || echo no)"
@@ -272,10 +275,10 @@ if ((LIST_ONLY)); then
     exit 0
 fi
 
-if ((DRY_RUN == 0 && DO_RESTART == 1)); then
-    warn "each node's sballd will be restarted; VMs keep running, but the node"
-    warn "leaves the cluster for the duration. Keep enough nodes quorate and"
-    warn "make sure this fits your maintenance window."
+if ((DRY_RUN == 0)); then
+    warn "this tool never restarts sballd: it installs the files, validates them,"
+    warn "waits for the node to be quorate and verifies it. Restarting the daemon"
+    warn "(so that a newly applied wrapper is used) is your call and your moment."
     if [[ -t 0 ]]; then
         read -r -p "   type 'yes' to continue: " answer
         [[ "$answer" == "yes" ]] || {
@@ -339,45 +342,34 @@ rollout_node() {
         }
     fi
 
-    # 3. validate before touching the service
+    # 3. validate: a broken hook set must be caught here, before anything runs
     info "validating the hook configuration"
     if ! rsh "$node" "sball-addition validate"; then
-        err "$node: 'sball-addition validate' failed, not restarting sballd"
+        err "$node: 'sball-addition validate' failed"
         printf '%s\n' "${LAST_OUT:-}" | sed 's/^/      | /' | head -10
         return 1
     fi
 
-    # 4. restart the service
-    if ((DO_RESTART)); then
-        info "restarting sballd.service"
-        if ! rsh "$node" "systemctl daemon-reload && systemctl restart sballd.service"; then
-            err "$node: restart failed"
-            return 1
+    # 4. the service is NOT restarted: wait for the node to be quorate. A node
+    #    whose daemon was never stopped answers immediately; a node the operator
+    #    is restarting by hand is followed here.
+    local waited=0
+    info "waiting for the node to be quorate (max ${WAIT_QUORATE}s, no restart)"
+    while ((waited < WAIT_QUORATE)); do
+        if rsh "$node" "sball-addition watcher --once"; then
+            good "$node is quorate after ${waited}s"
+            break
         fi
-    else
-        info "not restarting sballd (--no-restart)"
+        sleep 5
+        waited=$((waited + 5))
+    done
+    if ((waited >= WAIT_QUORATE)); then
+        err "$node did not report the quorate state within ${WAIT_QUORATE}s"
+        err "investigate: ssh $SSH_USER@$node 'sball-addition status; pvm --stat; sball-addition log --level=error | tail'"
+        return 1
     fi
 
-    # 5. wait for quorate
-    if ((DO_RESTART)); then
-        local waited=0
-        info "waiting for the node to become quorate (max ${WAIT_QUORATE}s)"
-        while ((waited < WAIT_QUORATE)); do
-            if rsh "$node" "sball-addition watcher --once"; then
-                good "$node is quorate again after ${waited}s"
-                break
-            fi
-            sleep 5
-            waited=$((waited + 5))
-        done
-        if ((waited >= WAIT_QUORATE)); then
-            err "$node did not reach the quorate state within ${WAIT_QUORATE}s"
-            err "investigate: ssh $SSH_USER@$node 'sball-addition status; pvm --stat; sball-addition log --level=error | tail'"
-            return 1
-        fi
-    fi
-
-    # 6. verify
+    # 5. verify
     if ((RUN_VERIFY)); then
         local verify_cmd="sball-node-verify --quiet"
         if ((SMOKE)); then verify_cmd="sball-node-verify --smoke"; fi

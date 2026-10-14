@@ -238,12 +238,31 @@ for path in \
     "$ROOT/var/lib/sball-addition/runtime" \
     "$ROOT/var/log/sball-addition" \
     "$ROOT/usr/lib/systemd/system/sball-addition-watcher.service" \
-    "$ROOT/etc/systemd/system/sballd.service.d/sball-addition.conf" \
     "$ROOT/etc/logrotate.d/sball-addition" \
     "$ROOT/usr/share/man/man8/sball-addition.8.gz" \
-    "$ROOT/usr/lib/systemd/system/sball-addition-metrics.timer"; do
+    "$ROOT/usr/lib/systemd/system/sball-addition-metrics.timer" \
+    "$ROOT/usr/bin/sball-integration" \
+    "$ROOT/usr/share/man/man8/sball-integration.8.gz"; do
     [[ -e "$path" ]] && ok "installed $(basename "$path")" || no "installed $path"
 done
+
+# the installer must leave the daemon alone: no unit file, no drop-in, no shim
+if [[ ! -e "$ROOT/etc/systemd/system/sballd.service.d/sball-addition.conf" ]]; then
+    ok "the installer writes no drop-in for sballd.service"
+else
+    no "the installer writes no drop-in for sballd.service"
+fi
+if [[ ! -e "$ROOT/usr/sbin/sballd" && ! -e "$ROOT/usr/sbin/sballd.real" ]]; then
+    ok "the installer replaces /usr/sbin/sballd with nothing (no shim by default)"
+else
+    no "the installer replaces /usr/sbin/sballd with nothing (no shim by default)"
+fi
+if grep -vE '^[[:space:]]*#' "$ROOT/usr/lib/systemd/system/sball-addition-watcher.service" 2>/dev/null |
+    grep -qE 'Wants=sballd|After=sballd|Requires=sballd|BindsTo=sballd'; then
+    no "the watcher unit has no systemd dependency on sballd.service"
+else
+    ok "the watcher unit has no systemd dependency on sballd.service"
+fi
 
 write_config "$PRIMARY_PORT"
 
@@ -665,21 +684,21 @@ else
     no "sball-rollout completes on a healthy cluster" "rc=$RC
 $OUT"
 fi
-RESTARTS=$(grep -c 'systemctl daemon-reload && systemctl restart sballd.service' "$FAKE_SSH_LOG")
-if [[ "$RESTARTS" == "3" ]]; then
-    ok "every node was restarted exactly once"
+# the contract, behaviourally: no command sent to any node may control sballd
+if grep -E 'sballd' "$FAKE_SSH_LOG" | grep -vE 'sball-addition status|sballd-wrapper|sball-node-verify' | grep -qE 'systemctl|daemon-reload'; then
+    no "the rollout sends no sballd command to any node" "$(grep -E 'systemctl|daemon-reload' "$FAKE_SSH_LOG" | head -3)"
 else
-    no "every node was restarted exactly once" "restart commands in the log: $RESTARTS"
+    ok "the rollout sends no sballd command to any node (no restart, no reload)"
 fi
-LAST_RESTART_HOST=$(grep 'systemctl daemon-reload && systemctl restart sballd.service' "$FAKE_SSH_LOG" | tail -1 | cut -d'|' -f1)
-if [[ "$LAST_RESTART_HOST" == "master1" ]]; then
-    ok "the master was restarted last"
+LAST_HOST=$(cut -d'|' -f1 "$FAKE_SSH_LOG" | grep -vE '^scp' | tail -1)
+if [[ "$LAST_HOST" == "master1" ]]; then
+    ok "the master was handled last"
 else
-    no "the master was restarted last" "last restart was on $LAST_RESTART_HOST"
+    no "the master was handled last" "last node touched: $LAST_HOST"
 fi
 grep -q 'scp .*sball-addition-1.0.0-1.x86_64.rpm' "$FAKE_SSH_LOG" &&
-    ok "the artifact was distributed before the restart" ||
-    no "the artifact was distributed before the restart"
+    ok "the artifact was distributed to the nodes" ||
+    no "the artifact was distributed to the nodes"
 grep -q 'rpm -Uvh' "$FAKE_SSH_LOG" && ok "the RPM was installed on the nodes" || no "the RPM was installed on the nodes"
 grep -q 'watcher --once' "$FAKE_SSH_LOG" && ok "the rollout waited for quorate" || no "the rollout waited for quorate"
 grep -q 'sball-node-verify --smoke' "$FAKE_SSH_LOG" && ok "the rollout ran the node verification" ||
@@ -695,7 +714,8 @@ else
 $OUT"
 fi
 check_contains "the rollout says it stopped" "$OUT" "stopping the rollout"
-if grep -E '^node2\|.*(restart sballd|watcher --once|sball-node-verify)' "$FAKE_SSH_LOG" >/dev/null; then
+check_contains "the plan says the service is never restarted" "$OUT" "restart sballd:  never"
+if grep -E '^node2\|.*(watcher --once|sball-node-verify)' "$FAKE_SSH_LOG" >/dev/null; then
     no "the nodes after the failure were not touched" "$(grep '^node2' "$FAKE_SSH_LOG")"
 else
     ok "the nodes after the failure were not touched (only the order probe asked for its status)"
@@ -755,6 +775,142 @@ fi
 check_zero "the socket can be skipped" cli metrics --no-socket
 check_not_contains "no socket means no reachability samples" "$OUT" "pvm_socket_reachable"
 check_zero "export-metrics is an alias" cli export-metrics
+
+section "17d. the sballd.service contract"
+# --- static half -------------------------------------------------------------
+run_cmd "$REPO/scripts/contract-check.sh"
+if [[ "$RC" == 0 ]]; then
+    ok "the static contract check passes ($(printf '%s' "$OUT" | tail -1 | cut -c1-60)...)"
+else
+    no "the static contract check passes" "$OUT"
+fi
+check_contains "it lists what it verified" "$OUT" "never started, stopped, restarted or reconfigured"
+
+# --- behavioural half: a systemctl that records every call -------------------
+CONTRACT_BIN="$SANDBOX/contractbin"
+mkdir -p "$CONTRACT_BIN"
+export FAKE_SYSTEMCTL_LOG="$SANDBOX/fake-systemctl.log"
+cat >"$CONTRACT_BIN/systemctl" <<'FAKESYSTEMCTL'
+#!/bin/bash
+printf '%s\n' "$*" >>"${FAKE_SYSTEMCTL_LOG:-/tmp/fake-systemctl.log}"
+case "$*" in
+    *is-active* | *is-enabled* | *show* | *cat* | *status*) exit 1 ;;
+    *) exit 0 ;;
+esac
+FAKESYSTEMCTL
+chmod +x "$CONTRACT_BIN/systemctl"
+rm -f "$FAKE_SYSTEMCTL_LOG"
+
+# every program that a rollout touches, run with the recording systemctl first
+# in PATH: if any of them controlled the daemon it would show up in the log.
+# --root=/ makes the programs take their real systemd code path (daemon-reload,
+# enable, is-active...), while --prefix keeps every file inside the sandbox and
+# the recording systemctl shadows the real one. Nothing outside $SANDBOX moves.
+SYSD_ROOT="$SANDBOX/systemd-root"
+run_cmd env "PATH=$CONTRACT_BIN:$PATH" "$REPO/scripts/install.sh" --root=/ --prefix="$SYSD_ROOT" \
+    --no-samples --with-systemd --enable-service
+if [[ "$RC" == 0 ]]; then
+    ok "an install that talks to systemd succeeds with the recording shim"
+else
+    no "an install that talks to systemd succeeds with the recording shim" "rc=$RC
+$OUT"
+fi
+run_cmd env "PATH=$CONTRACT_BIN:$PATH" "$REPO/scripts/verify-node.sh" --root=/ --prefix="$SYSD_ROOT" --quiet
+run_cmd env "PATH=$CONTRACT_BIN:$PATH" "$REPO/scripts/sballd-integration.sh" --root="$SYSD_ROOT" status
+run_cmd env "PATH=$CONTRACT_BIN:$PATH" "$REPO/scripts/uninstall.sh" --root=/ --prefix="$SYSD_ROOT"
+if [[ ! -e "$SYSD_ROOT/etc/sball-addition" ]]; then
+    ok "the whole exercise stayed inside the sandbox prefix"
+else
+    no "the whole exercise stayed inside the sandbox prefix"
+fi
+if [[ -s "$FAKE_SYSTEMCTL_LOG" ]]; then
+    ok "systemctl was really called, so the assertions below mean something: $(paste -sd', ' "$FAKE_SYSTEMCTL_LOG" | cut -c1-90)"
+else
+    no "systemctl was really called, so the assertions below mean something" "the shim recorded nothing"
+fi
+grep -q 'daemon-reload' "$FAKE_SYSTEMCTL_LOG" &&
+    ok "the installer reloaded systemd for our own units" ||
+    no "the installer reloaded systemd for our own units" "$(cat "$FAKE_SYSTEMCTL_LOG")"
+if grep -q 'sballd' "$FAKE_SYSTEMCTL_LOG"; then
+    no "no program ever asks systemctl about sballd" "$(grep 'sballd' "$FAKE_SYSTEMCTL_LOG")"
+else
+    ok "no program ever asks systemctl about sballd (install, verify, integration, uninstall)"
+fi
+grep -q 'sball-addition-watcher.service' "$FAKE_SYSTEMCTL_LOG" &&
+    ok "our own watcher unit is the only one they manage" ||
+    ok "our own units are the only ones they manage"
+unset FAKE_SYSTEMCTL_LOG
+
+# --- the one writer, and only when a human runs it ---------------------------
+INT_ROOT="$SANDBOX/integration-root"
+run_cmd env "PATH=$CONTRACT_BIN:$PATH" "$REPO/scripts/install.sh" --root="$INT_ROOT" --no-samples --with-systemd
+run_cmd "$REPO/scripts/sballd-integration.sh" --root="$INT_ROOT" status
+check_rc "status exits 1 when nothing is applied" 1 "$REPO/scripts/sballd-integration.sh" --root="$INT_ROOT" status
+check_contains "status explains how to apply it" "$OUT" "apply"
+run_cmd "$REPO/scripts/sballd-integration.sh" --root="$INT_ROOT" apply --dry-run
+check_zero "apply --dry-run succeeds" bash -c "true"
+if [[ ! -e "$INT_ROOT/etc/systemd/system/sballd.service.d/sball-addition.conf" ]]; then
+    ok "apply --dry-run writes nothing"
+else
+    no "apply --dry-run writes nothing"
+fi
+check_zero "apply --print prints the drop-in without writing it" bash -c \
+    '"$1" --root="$2" apply --print >/dev/null' _ "$REPO/scripts/sballd-integration.sh" "$INT_ROOT"
+if [[ ! -e "$INT_ROOT/etc/systemd/system/sballd.service.d/sball-addition.conf" ]]; then
+    ok "apply --print writes nothing either"
+else
+    no "apply --print writes nothing either"
+fi
+run_cmd "$REPO/scripts/sballd-integration.sh" --root="$INT_ROOT" apply
+DROPIN="$INT_ROOT/etc/systemd/system/sballd.service.d/sball-addition.conf"
+if [[ "$RC" == 0 && -f "$DROPIN" ]]; then
+    ok "apply writes the ExecStart drop-in"
+else
+    no "apply writes the ExecStart drop-in" "rc=$RC
+$OUT"
+fi
+check_contains "it points at the wrapper, not at the daemon" "$(cat "$DROPIN" 2>/dev/null)" "ExecStart=$INT_ROOT/usr/bin/sballd-wrapper"
+check_contains "it resets the vendor ExecStart first" "$(cat "$DROPIN" 2>/dev/null)" "ExecStart="
+check_contains "it tells the operator to reload and restart" "$OUT" "systemctl daemon-reload && systemctl restart sballd.service"
+check_contains "and says it does not do it" "$OUT" "does not restart services"
+check_rc "status exits 0 once it is applied" 0 "$REPO/scripts/sballd-integration.sh" --root="$INT_ROOT" status
+check_zero "verify-node reports the applied integration" "$REPO/scripts/verify-node.sh" --root="$INT_ROOT" --quiet
+# rewriting it is idempotent, a foreign file is refused
+printf '# foreign\n' >"$DROPIN"
+check_rc "a foreign drop-in is not overwritten without --yes" 2 \
+    "$REPO/scripts/sballd-integration.sh" --root="$INT_ROOT" apply
+run_cmd "$REPO/scripts/sballd-integration.sh" --root="$INT_ROOT" apply --yes
+check_zero "apply --yes overwrites it" bash -c 'grep -q sballd-wrapper "$1"' _ "$DROPIN"
+run_cmd "$REPO/scripts/sballd-integration.sh" --root="$INT_ROOT" remove
+if [[ "$RC" == 0 && ! -e "$DROPIN" ]]; then
+    ok "remove deletes the drop-in again"
+else
+    no "remove deletes the drop-in again" "rc=$RC"
+fi
+check_rc "status is back to 1 after remove" 1 "$REPO/scripts/sballd-integration.sh" --root="$INT_ROOT" status
+
+# --- the shim, only on purpose ----------------------------------------------
+printf '#!/bin/sh\necho the real daemon\n' >"$INT_ROOT/usr/sbin/sballd"
+chmod 0755 "$INT_ROOT/usr/sbin/sballd"
+run_cmd "$REPO/scripts/sballd-integration.sh" --root="$INT_ROOT" apply --mode=shim
+if [[ "$RC" == 0 && -f "$INT_ROOT/usr/sbin/sballd.real" ]] &&
+    grep -q 'sballd-wrapper' "$INT_ROOT/usr/sbin/sballd"; then
+    ok "shim mode preserves the daemon and puts the wrapper in its place"
+else
+    no "shim mode preserves the daemon and puts the wrapper in its place" "rc=$RC
+$OUT"
+fi
+run_cmd "$REPO/scripts/sballd-integration.sh" --root="$INT_ROOT" status
+check_contains "status reports both modes" "$OUT" "shim:"
+run_cmd "$REPO/scripts/sballd-integration.sh" --root="$INT_ROOT" remove
+if [[ "$RC" == 0 && ! -f "$INT_ROOT/usr/sbin/sballd.real" ]] &&
+    grep -q 'the real daemon' "$INT_ROOT/usr/sbin/sballd"; then
+    ok "remove restores the real daemon"
+else
+    no "remove restores the real daemon" "rc=$RC"
+fi
+check_rc "an unknown mode is a usage error" 2 "$REPO/scripts/sballd-integration.sh" --mode=nonsense status
+PATH=${PATH#"$CONTRACT_BIN:"}
 
 section "18. complete uninstall"
 run_cmd "$REPO/scripts/uninstall.sh" --root="$ROOT"

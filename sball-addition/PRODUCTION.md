@@ -22,8 +22,6 @@ ssh root@node '
   sball-addition list &&
   sball-addition run-phase pre-quorate --dry-run &&
   sball-node-verify --quiet &&
-  systemctl daemon-reload &&
-  systemctl restart sballd.service &&
   sball-addition watcher --once &&
   systemctl enable --now sball-addition-watcher.service
 '
@@ -35,6 +33,13 @@ in between:
 ```console
 sudo sball-rollout --nodes=nodes.txt --rpm=/root/sball-addition-1.0.0-1.x86_64.rpm --smoke
 ```
+
+**Nothing above restarts `sballd`.** This tool never starts, stops, restarts,
+enables, disables or reconfigures the PVM service, and it installs no unit file,
+drop-in or binary that belongs to it — so installing it is invisible to your
+running VMs and to quorum. Starting the daemon through the wrapper (which is what
+makes the hooks run at boot or at a restart) is a decision you make, once, with
+`sball-integration apply`; the restart itself is always yours.
 
 ---
 
@@ -56,7 +61,7 @@ the glibc of the node and the same artifact runs on RHEL 7 and RHEL 9.
 
 ```console
 cd sball-addition
-make test          # go vet + unit tests + man page render + 147 integration assertions
+make test          # go vet + contract check + unit tests + man pages + 181 integration assertions
 make bundle        # release/sball-addition-1.0.0-bundle/
 ```
 
@@ -76,7 +81,8 @@ Build individual artifacts when you only need one: `make tarball`, `make rpm`
 (needs `rpm-build`), `make deb` (needs only `dpkg-deb`, so a RHEL build host can
 produce it too). Both packages install the same tree, keep their configuration
 files as `conffile`/`%config`, ship the man pages and the systemd units, and
-leave `sballd.service` untouched apart from the drop-in file.
+never install, change or restart anything that belongs to the PVM service
+(see `sball-integration` below for the one, hand-run exception).
 
 ```console
 cd release/sball-addition-1.0.0-bundle && sha256sum -c SHA256SUMS
@@ -107,7 +113,7 @@ Every command that touches hooks can be previewed:
 
 ```console
 sball-addition list                                   # order, targets, enabled state
-sball-addition run-phase pre-quorate --dry-run        # what the wrapper would run
+sball-addition run-phase pre-quorate --dry-run        # what a start would run
 sball-addition run-phase post-quorate --dry-run --json
 sball-addition validate                               # config, headers, dirs, socket
 ./scripts/install.sh --root=/tmp/rehearsal --dry-run  # what the installer would do
@@ -136,27 +142,44 @@ scp release/sball-addition-1.0.0-bundle/sball-addition-1.0.0-1.x86_64.rpm root@n
 
 ssh root@node3
 rpm -Uvh /root/sball-addition-1.0.0-1.x86_64.rpm     # installs files, does NOT touch sballd.service
-systemctl daemon-reload                              # picks up the ExecStart drop-in
+systemctl daemon-reload                              # picks up our units only
 
 sball-addition list                                  # hooks and their order
-sball-addition run-phase pre-quorate --dry-run       # what the start would execute
+sball-addition run-phase pre-quorate --dry-run       # what a start would execute
+sball-addition run-phase pre-quorate                 # optionally: run them now, by hand
 sball-node-verify --smoke                            # deployment gate, incl. a real hook round trip
 
-systemctl restart sballd.service
-sball-addition watcher --once && pvm --stat          # wait for quorate, look at the node table
+sball-addition watcher --once && pvm --stat          # is the node quorate? what does the table say?
 systemctl enable --now sball-addition-watcher.service
-sball-addition log --since=10m --pretty              # pre + post phase of the restart
+sball-addition log --since=10m --pretty              # everything that ran so far
 ```
+
+Then, and only then, when your maintenance window says so — restart the daemon
+*during* which the hooks are attached. Apply the integration on the canary first:
+
+```console
+sball-integration status                             # expected: not applied (exit 1)
+sball-integration apply                              # writes the ExecStart drop-in
+# the command prints, it does not run:
+systemctl daemon-reload && systemctl restart sballd.service
+sball-addition watcher --once && sball-addition log --since=10m --pretty
+```
+
+If you would rather not attach the hooks to the start path at all, skip that
+step: run the phases from your own runbook (`sball-addition run-phase
+pre-quorate` before you start the daemon, `post-quorate` after it is up), or let
+the watcher do the post-quorate part while the pre-quorate part stays manual.
 
 Success criteria on the canary:
 
 * `sball-addition list` shows the hooks you expect, none `INVALID`;
-* the restart ran the pre-quorate hooks **before** `sballd` started (log:
-  `phase_start` → hook events → `phase_finish` → then the daemon pid appears);
+* the restart you performed ran the pre-quorate hooks **before** `sballd`
+  started (log: `phase_start` → hook events → `phase_finish` → then the daemon
+  pid appears) — with the integration applied;
 * within 5 s of quorate the watcher logged `"event":"quorate"` and the
   post-quorate phase finished;
-* `sball-node-verify` reports `NODE READY` (warnings about a missing shim or an
-  unreachable socket while the service is down are fine);
+* `sball-node-verify` reports `NODE READY` (it reports "sballd.service left
+  alone" until you apply the integration — that is the default, not a failure);
 * VMs on the node keep running (the wrapper only runs hooks and `exec`s the
   daemon — it does not stop or start VMs).
 
@@ -185,14 +208,20 @@ sudo sball-rollout --nodes=nodes.txt \
 1. check whether `sball-addition` is installed (prints the version),
 2. copy and install the artifact (`rpm -Uvh`, or the tarball + its `install.sh`),
 3. `sball-addition validate` — **aborts the node** if the hook set is broken,
-4. `systemctl daemon-reload && systemctl restart sballd.service`,
-5. poll `sball-addition watcher --once` until the node is quorate again
-   (default: up to `--wait-quorate=300` s),
-6. `sball-node-verify` (with `--smoke` if requested),
+4. poll `sball-addition watcher --once` until the node is quorate
+   (default: up to `--wait-quorate=300` s; a node you did not restart answers
+   immediately),
+5. `sball-node-verify` (with `--smoke` if requested),
 
 and only then continues with the next node. It **stops** on the first failure
-unless you pass `--continue-on-error`, and it asks for a typed `yes` before the
-first restart.
+unless you pass `--continue-on-error`, and it asks for a typed `yes` once before
+it touches the first node.
+
+It never restarts `sballd`, so it cannot cost you quorum: the restart (and the
+moment for it) is yours. Because of that, "master last" is about **load**, not
+about restarts — you still want the coordinator to keep running while the
+workers are being updated, and if your own procedure includes a restart per node,
+do it in the order the rollout prints.
 
 Ordering: by default `sball-rollout` asks every node `sball-addition status`
 whether it is the cluster master and moves master nodes to the end, so the
@@ -387,9 +416,11 @@ logrotate -f /etc/logrotate.d/sball-addition
 ```
 
 Upgrades are rolling like installs: one node, `sball-node-verify --smoke`,
-restart the watcher (the watcher itself is restarted, not `sballd`, so the node
-stays in the cluster). Only restart `sballd` when the wrapper or the service
-plumbing changed.
+restart the watcher (the watcher is *our* unit — restarting it does not touch
+`sballd` and the node stays in the cluster). An upgrade never restarts the
+daemon, so a package update is free of quorum risk; if your hooks changed and you
+want them applied to a running node, use `sball-addition run-phase ... --force`
+instead of restarting `sballd`.
 
 Keep `/etc/sball-addition` in git (hooks are code): commit hooks, deploy with
 your configuration management, and let `sball-addition validate` be the gate in
@@ -408,16 +439,17 @@ it with your hook files (`role`-style `copy` into
 |-----------|--------|
 | A hook blocks the start and you need the node up **now** | `SBALL_ADDITION_SKIP_WRAPPER=1 systemctl start sballd.service` |
 | The watcher misbehaves | `systemctl stop sball-addition-watcher.service` (hooks stop firing, `sballd` is unaffected) |
-| The wrapper is suspected | delete the drop-in, `systemctl daemon-reload`, `systemctl restart sballd.service` |
-| The shim (`/usr/sbin/sballd`) is suspected | `mv /usr/sbin/sballd.real /usr/sbin/sballd` |
+| The wrapper is suspected | `sball-integration remove` (drops the drop-in / restores the daemon), then reload and restart `sballd` yourself whenever it suits the cluster |
 | Roll the package back | `rpm -Uvh --oldpackage sball-addition-<previous>.rpm && systemctl daemon-reload` |
-| Remove it entirely | `scripts/uninstall.sh` (stops the watcher, removes the drop-in, restores the daemon, deletes everything and proves nothing is left) |
+| Remove it entirely | `scripts/uninstall.sh` (stops our watcher, removes the drop-in or restores the daemon *if* they were applied, deletes everything, proves nothing is left) |
 | Remove the RPM, keep hooks/state | `rpm -e sball-addition` |
 
-`sball-addition` is additive by design: it installs a wrapper, a unit, a drop-in
-and a hook tree. Removing those four things returns the node to a plain
-`/usr/sbin/sballd` start — no database, no state you must migrate, nothing that
-survives in the daemon.
+`sball-addition` is additive by design: it installs a wrapper, its own units and
+a hook tree, and — only if you applied it — a drop-in or a shim for the service.
+Removing those returns the node to a plain `/usr/sbin/sballd` start: no database,
+no state you must migrate, nothing that survives inside the daemon. Between
+"installed" and "hooks attached to the start path" every operation in this
+runbook is reversible without ever signalling `sballd`, let alone stopping it.
 
 ---
 
@@ -459,7 +491,7 @@ Copy this into your change ticket:
 [ ] rollout plan reviewed: `sball-rollout --nodes=nodes.txt --list` (master last)
 [ ] change window announced; VM owners informed (nodes leave the cluster briefly)
 [ ] monitoring rules for poll_timeout / phase_abort / give_up in place
-[ ] rollback rehearsed on the canary (SKIP_WRAPPER + drop-in removal)
+[ ] rollback rehearsed on the canary (`SBALL_ADDITION_SKIP_WRAPPER=1` + `sball-integration remove`)
 [ ] after the rollout: watcher enabled on every node, errors from the last hour read
 [ ] hooks are committed to git with the commit hash in the ticket
 ```
@@ -470,7 +502,8 @@ Copy this into your change ticket:
 
 | Symptom | First command | Likely cause |
 |---------|---------------|--------------|
-| hooks do not run at all | `systemctl cat sballd.service \| grep ExecStart` | drop-in missing or `daemon-reload` not run |
+| hooks do not run at start | `sball-integration status` | nothing is wired in (the default): apply it, then reload + restart the daemon yourself |
+| hooks do run when you test them but not at boot | `grep ExecStart /usr/lib/systemd/system/sballd.service /etc/systemd/system/sballd.service.d/*.conf` | the drop-in is not applied, or `daemon-reload` was not run after applying it |
 | node does not start after the rollout | `sball-addition log --level=error --since=10m` | pre-quorate hook with `ON_FAIL: abort`; `SBALL_ADDITION_SKIP_WRAPPER=1` gets you up |
 | post-quorate hooks never fire | `systemctl status sball-addition-watcher`, `sball-addition status` | watcher not enabled/running, or the node is not quorate |
 | `watcher` exits 5 | `cat /var/lib/sball-addition/runtime/watcher.lock` | another watcher already runs (only one per node) |
