@@ -51,6 +51,8 @@ rm -rf %{buildroot}
 install -d %{buildroot}%{_bindir} %{buildroot}%{_sbindir}
 install -m 0755 bin/sball-addition       %{buildroot}%{_bindir}/sball-addition
 install -m 0755 scripts/sballd-wrapper   %{buildroot}%{_bindir}/sballd-wrapper
+install -m 0755 scripts/verify-node.sh   %{buildroot}%{_bindir}/sball-node-verify
+install -m 0755 scripts/rollout.sh       %{buildroot}%{_bindir}/sball-rollout
 install -m 0755 scripts/sballd-wrapper   %{buildroot}%{_sbindir}/sballd-wrapper
 
 install -d %{buildroot}%{_sysconfdir}/sball-addition/hooks.d/pre-quorate.d
@@ -73,9 +75,19 @@ install -d %{buildroot}%{_localstatedir}/log/sball-addition
 install -d %{buildroot}%{_unitdir}
 install -m 0644 packaging/systemd/sball-addition-watcher.service \
     %{buildroot}%{_unitdir}/sball-addition-watcher.service
+install -m 0644 packaging/systemd/sball-addition-metrics.service \
+    %{buildroot}%{_unitdir}/sball-addition-metrics.service
+install -m 0644 packaging/systemd/sball-addition-metrics.timer \
+    %{buildroot}%{_unitdir}/sball-addition-metrics.timer
 install -d %{buildroot}%{_sysconfdir}/systemd/system/sballd.service.d
 install -m 0644 packaging/systemd/sballd.service.d/sball-addition.conf \
     %{buildroot}%{_sysconfdir}/systemd/system/sballd.service.d/sball-addition.conf
+
+install -d %{buildroot}%{_mandir}/man8
+install -m 0644 docs/sball-addition.8     %{buildroot}%{_mandir}/man8/sball-addition.8
+install -m 0644 docs/sballd-wrapper.8     %{buildroot}%{_mandir}/man8/sballd-wrapper.8
+install -m 0644 docs/sball-node-verify.8  %{buildroot}%{_mandir}/man8/sball-node-verify.8
+install -m 0644 docs/sball-rollout.8      %{buildroot}%{_mandir}/man8/sball-rollout.8
 
 install -d %{buildroot}%{_sysconfdir}/logrotate.d
 install -m 0644 packaging/logrotate.d/sball-addition \
@@ -94,6 +106,7 @@ sball-addition installed.
        /etc/sball-addition/hooks.d/pre-quorate.d/
        /etc/sball-addition/hooks.d/post-quorate.d/
      verify them with:  sball-addition validate && sball-addition list
+     check the node with:  sball-node-verify --smoke
 
   2. run the pre/post hooks with the service (systemd drop-in is in place):
        systemctl daemon-reload && systemctl restart sballd.service
@@ -104,7 +117,13 @@ sball-addition installed.
   4. starts that bypass systemd (pvm-wrapper --start) can be covered too:
        ./scripts/install.sh --shim-sballd
 
+  5. optional Prometheus metrics (node_exporter textfile collector):
+       echo 'SBALL_METRICS_ARGS=--out /var/lib/node_exporter/textfile_collector/sball-addition.prom' \
+           >> /etc/sysconfig/sball-addition
+       systemctl enable --now sball-addition-metrics.timer
+
   logs: /var/log/sball-addition/sball-addition.log (JSON, jq friendly)
+  deploy: PRODUCTION.md (also installed as %{_docdir}/%{name}/PRODUCTION.md)
 
 EOF
 
@@ -130,6 +149,8 @@ fi
 %files
 %{_bindir}/sball-addition
 %{_bindir}/sballd-wrapper
+%{_bindir}/sball-node-verify
+%{_bindir}/sball-rollout
 %{_sbindir}/sballd-wrapper
 %dir %{_sysconfdir}/sball-addition
 %dir %{_sysconfdir}/sball-addition/hooks.d
@@ -144,6 +165,13 @@ fi
 %config(noreplace) %{_sysconfdir}/logrotate.d/sball-addition
 %config(noreplace) %{_sysconfdir}/systemd/system/sballd.service.d/sball-addition.conf
 %{_unitdir}/sball-addition-watcher.service
+%{_unitdir}/sball-addition-metrics.service
+%{_unitdir}/sball-addition-metrics.timer
+%{_mandir}/man8/sball-addition.8*
+%{_mandir}/man8/sballd-wrapper.8*
+%{_mandir}/man8/sball-node-verify.8*
+%{_mandir}/man8/sball-rollout.8*
+%doc README.md PRODUCTION.md docs/hook-template.sh
 %dir %{_localstatedir}/lib/sball-addition
 %dir %{_localstatedir}/lib/sball-addition/state
 %dir %{_localstatedir}/lib/sball-addition/state/pre-quorate

@@ -1,0 +1,82 @@
+.\" sballd-wrapper manual page
+.TH SBALLD-WRAPPER 8 "2026-10-14" "sball-addition 1.0.0" "System Administration"
+.SH NAME
+sballd-wrapper \- run the pre-quorate hooks and start the PVM service
+.SH SYNOPSIS
+.B sballd-wrapper
+[\fIsballd arguments\fR]
+.SH DESCRIPTION
+.B sballd-wrapper
+replaces
+.BR sballd (8)
+as the entry point of the service unit
+.RB ( "
+ExecStart=/usr/bin/sballd-wrapper
+" ).
+It runs the pre-quorate hooks, starts the post-quorate watcher and finally
+.BR exec s
+the real daemon with the original arguments, so the pid, the signal handling
+and the systemd behaviour stay identical to a plain
+.B sballd
+start.
+.PP
+A failing hook with
+.B ON_FAIL=abort
+(stop the phase) aborts the start: the node stays out of the cluster instead of
+joining half configured. Errors of the hook system itself (missing binary,
+broken configuration, invalid hook set) only produce a warning \(em the daemon
+is started anyway \(em unless
+.B SBALL_ADDITION_REQUIRED=1
+is set.
+.SH ENVIRONMENT
+.TP
+.B SBALLD_BIN
+The real daemon. Defaults to
+.I /usr/sbin/sballd.real
+when it exists (shim installation), otherwise
+.IR /usr/sbin/sballd .
+.TP
+.B SBALL_ADDITION_BIN
+The sball-addition CLI (default
+.IR /usr/bin/sball-addition ).
+.TP
+.B SBALL_ADDITION_WRAPPER_ARGS
+Extra CLI arguments, for example
+.IR "\-\-log\-level=debug" .
+.TP
+.B SBALL_ADDITION_REQUIRED
+Set to 1 to abort the start when the hook system itself is broken (default 0 =
+fail open).
+.TP
+.B SBALL_ADDITION_SKIP_WRAPPER
+Set to 1 to start the daemon without running any hook (emergency switch).
+.TP
+.B SBALL_ADDITION_LOG
+Log file mentioned in the messages printed on failure (default
+.IR /var/log/sball-addition/sball-addition.log ).
+.SH FILES
+.TP
+.I /etc/sball-addition/hooks.d/pre-quorate.d
+Hooks executed before the daemon starts.
+.TP
+.I /etc/systemd/system/sballd.service.d/sball-addition.conf
+The drop-in that points
+.B sballd.service
+at this wrapper.
+.SH EXAMPLES
+Start the service the way an upgrade or a reboot would:
+.PP
+.RS
+systemctl restart sballd.service
+.RE
+.PP
+Preview the hooks without starting anything:
+.PP
+.RS
+sball-addition run-phase pre-quorate \-\-dry-run
+.RE
+.SH SEE ALSO
+.BR sball-addition (8),
+.BR sball-node-verify (8),
+.BR sball-rollout (8),
+.BR systemd.service (5)

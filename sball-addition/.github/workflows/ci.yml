@@ -1,0 +1,116 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  GO_VERSION: "1.23.4"
+
+jobs:
+  # --------------------------------------------------------------- source ---
+  lint:
+    name: lint (gofmt, vet, shellcheck, man)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: gofmt
+        run: test -z "$(gofmt -l cmd internal)"
+      - name: go vet
+        run: go vet ./...
+      - name: install shellcheck + groff
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck groff-base
+      - name: shellcheck
+        run: |
+          shellcheck -S warning scripts/*.sh lib/common.sh hooks/*/*.sh \
+            docs/hook-template.sh test/integration/run.sh
+      - name: man pages render
+        run: make man-check
+
+  # ---------------------------------------------------------------- unit ----
+  unit:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: go test -race
+        run: go test -race ./...
+
+  # ----------------------------------------------------------- integration --
+  integration:
+    name: integration (sandboxed cluster, fake PVM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: install runtime tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq gettext-base python3 curl
+      - name: make test
+        # go vet + unit tests + man-check + the 147 assertion integration suite
+        # (runs entirely inside a throw-away root, no root privileges needed)
+        run: make test
+      - name: upload the integration log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-log
+          path: /tmp/sball-addition-itest.*/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ------------------------------------------------------------- packages ---
+  packages:
+    name: packages (tarball, rpm, deb + lintian)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: install packaging tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rpm dpkg-dev lintian jq gettext-base
+      - name: build the bundle
+        run: make bundle
+      - name: verify the checksums
+        run: cd release/sball-addition-*-bundle && sha256sum -c SHA256SUMS
+      - name: lintian (must be silent)
+        run: |
+          DEB=$(ls -1 release/*.deb)
+          lintian --fail-on error,warning "$DEB"
+          lintian "$DEB"
+      - name: DEB smoke test (install into a throw-away root, run it)
+        run: |
+          DEB=$(ls -1 release/*.deb)
+          dpkg-deb -x "$DEB" /tmp/deb-root
+          /tmp/deb-root/usr/bin/sball-addition version
+          test -x /tmp/deb-root/usr/bin/sball-node-verify
+          for page in sball-addition sballd-wrapper sball-node-verify sball-rollout; do
+            test -s "/tmp/deb-root/usr/share/man/man8/$page.8.gz"
+          done
+          gzip -t /tmp/deb-root/usr/share/man/man8/*.gz
+      - name: RPM contents smoke test
+        run: |
+          RPM=$(ls -1 release/*.rpm)
+          rpm -qpl "$RPM" | grep -q '/usr/bin/sball-addition'
+          rpm -qpl "$RPM" | grep -q '/usr/lib/systemd/system/sball-addition-metrics.timer'
+          rpm -qpl "$RPM" | grep -q '/usr/share/man/man8/sball-addition.8.gz'
+      - name: upload the bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: sball-addition-bundle
+          path: release/sball-addition-*-bundle/
+          retention-days: 14

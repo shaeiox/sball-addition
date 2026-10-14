@@ -1,0 +1,25 @@
+[Unit]
+Description=sball-addition metrics exporter (Prometheus textfile)
+Documentation=man:sball-addition(8)
+# Runs on its own timer; no dependency on sballd so that a node which is down
+# still exports "sballd_up 0" (that is the interesting case).
+ConditionPathExists=/usr/bin/sball-addition
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/sysconfig/sball-addition
+# Default SBALL_METRICS_ARGS (set in /etc/sysconfig/sball-addition) writes to
+# node_exporter's textfile collector:
+#   SBALL_METRICS_ARGS=--out /var/lib/node_exporter/textfile_collector/sball-addition.prom
+# Without it the metrics go to stdout, which systemd captures in the journal.
+ExecStart=/usr/bin/sball-addition metrics $SBALL_METRICS_ARGS
+# The exporter only reads state and rewrites one small file.
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

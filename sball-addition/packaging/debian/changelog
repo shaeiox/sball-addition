@@ -1,0 +1,9 @@
+sball-addition (1.0.0-1) unstable; urgency=medium
+
+  * Initial release: pre/post-quorate hooks, service wrapper, quorate watcher,
+    JSON logging, timeouts, retries, RUN_ONCE markers, cluster aware targets
+    (local/master/all), CLI, node acceptance checker (sball-node-verify),
+    quorum safe cluster rollout (sball-rollout), Prometheus textfile exporter,
+    systemd units, sample hooks and the production runbook.
+
+ -- CloudAvid PVM team <pvm@cloudavid.com>  Wed, 14 Oct 2026 08:00:00 +0000

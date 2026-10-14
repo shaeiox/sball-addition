@@ -55,9 +55,12 @@ then the
 .B AFTER
 dependency, with ties broken by filename.
 .TP
-.BI run " hook-name [\-\-phase=" phase "] [\-\-force] [\-\-no\-state] [\-\-quiet]"
+.BI run " hook-name [\-\-phase=" phase "] [\-\-force] [\-\-no\-state] [\-\-quiet] [\-\-dry\-run]"
 Run a single hook immediately, honouring TIMEOUT, RETRY, RETRY_BACKOFF, TARGET
 and RUN_ONCE.
+.B \-\-dry\-run
+reports what would happen (including every skip decision) without executing the
+hook.
 .B \-\-force
 ignores a RUN_ONCE marker;
 .B \-\-no\-state
@@ -66,12 +69,19 @@ The hook's stdout/stderr are shown unless
 .B \-\-quiet
 is given. The exit status is the hook's exit status.
 .TP
-.BI run\-phase " phase [\-\-force] [\-\-quiet] [\-\-json]"
+.BI run\-phase " phase [\-\-force] [\-\-quiet] [\-\-json] [\-\-dry\-run]"
 Run every hook of a phase in order. This is the command
 .B sballd-wrapper
 uses; it exits non-zero when a hook with
 .B ON_FAIL=abort
 failed.
+.B \-\-dry\-run
+prints the resolved execution order with timeouts, retry counts, targets and
+.IR ON_FAIL
+policies, performs all skip decisions and executes nothing - the safe way to
+preview a service start.
+.B \-\-json
+turns the same information into a machine readable summary.
 .TP
 .B status [\-\-json]
 Show the version, sballd pid/state/uptime, the cluster master, watcher state,
@@ -123,6 +133,30 @@ polls a single time and exits without an error when the node is not quorate
 yet, which is convenient for cron and for tests.
 Exit status 5 means another watcher already holds the lock, exit status 6 means
 the poll timeout expired.
+.TP
+.B metrics [\-\-out=\fIfile\fR] [\-\-no\-socket] [\-\-json]
+Print the node and hook state in the Prometheus text exposition format (alias
+.BR export\-metrics ).
+Without
+.B \-\-out
+the exposition goes to stdout;
+.B \-\-out
+writes it atomically (temporary file plus rename, the directory is created when
+needed), which is what a node_exporter textfile collector wants.
+.B \-\-no\-socket
+skips the PVM query; the
+.IR pvm_socket_reachable ,
+.I quorate
+and
+.I is_master
+series are then omitted instead of being reported as 0, so an alert on
+.B sball_addition_quorate == 0
+does not fire on a node that was simply never asked.
+.B \-\-json
+prints the same snapshot as JSON.
+See the
+.I monitoring
+section of PRODUCTION.md for the alert rules.
 .TP
 .B version [\-\-json]
 Print the version, commit and build date.
@@ -343,6 +377,42 @@ When set to 1 the wrapper refuses to start sballd if the CLI is missing
 .B SBALL_ADDITION_SKIP_WRAPPER
 When set to 1 the wrapper starts sballd without running any hook (emergency
 switch).
+.SH PRODUCTION
+Two helper commands are installed next to
+.BR sball-addition :
+.TP
+.B sball-node-verify [\-\-smoke] [\-\-json] [\-\-root=\fIdir\fR]
+Acceptance check for one node: binary, configuration, hook headers and ordering,
+hook file permissions, wrapper, systemd wiring, watcher process, state/runtime/log
+directories, PVM socket and the resolved pre-quorate plan. With
+.B \-\-smoke
+it installs, runs and removes a temporary hook. Exit status 1 means "do not
+restart this node yet".
+.TP
+.B sball-rollout \-\-nodes=\fIfile\fR [\-\-rpm=\fIfile\fR|\-\-tarball=\fIfile\fR]
+Cluster rollout over ssh: copies and installs the artifact, runs
+.BR "sball-addition validate" ,
+restarts
+.BR sballd.service ,
+waits for the node to become quorate again
+.RB ( \-\-wait\-quorate ,
+default 300 s) and runs
+.BR sball-node-verify .
+Non-master nodes are rolled out first, master nodes last
+.RB ( \-\-no\-master\-last
+keeps the given order), the rollout stops on the first failure unless
+.B \-\-continue\-on\-error
+is given.
+.B \-\-dry\-run
+and
+.B \-\-list
+show the plan without executing anything.
+.PP
+See
+.I PRODUCTION.md
+in the distribution for the complete deployment, monitoring and rollback
+runbook.
+
 .SH EXAMPLES
 Show the installed hooks:
 .PP
@@ -354,6 +424,18 @@ Run one hook now and ignore its RUN_ONCE marker:
 .PP
 .RS
 sball-addition run register-monitoring \-\-force
+.RE
+.PP
+Preview what a service start would execute:
+.PP
+.RS
+sball-addition run-phase pre-quorate \-\-dry\-run
+.RE
+.PP
+Check a node before restarting it:
+.PP
+.RS
+sball-node-verify \-\-smoke
 .RE
 .PP
 Watch the log of the post-quorate phase:
@@ -379,4 +461,7 @@ sball-addition watcher \-\-once || echo "not quorate yet"
 .BR systemctl (1),
 .BR systemd.service (5)
 .PP
-The project README documents the wrapper, the RPM and the integration modes.
+The project README documents the wrapper, the RPM and the integration modes;
+.I PRODUCTION.md
+covers building the release bundle, the quorum-safe cluster rollout, monitoring,
+upgrades and rollback.

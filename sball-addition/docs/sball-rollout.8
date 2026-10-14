@@ -1,0 +1,163 @@
+.\" sball-rollout manual page
+.TH SBALL-ROLLOUT 8 "2026-10-14" "sball-addition 1.0.0" "System Administration"
+.SH NAME
+sball-rollout \- quorum safe, one node at a time rollout of sball-addition
+.SH SYNOPSIS
+.B sball-rollout
+\fB\-\-nodes=\fIfile\fR|\fIhost1,host2\fR [\fIoptions\fR]
+.br
+.B sball-rollout
+\fB\-\-local\fR [\fIoptions\fR]
+.SH DESCRIPTION
+.B sball-rollout
+installs or updates sball-addition on a PVM cluster over ssh, one node at a
+time, and waits for every node to become quorate again before it continues. Per
+node it performs:
+.IP "1." 3
+check whether sball-addition is installed and print the version
+.IP "2." 3
+copy and install the artifact
+.RB ( "rpm \-Uvh"
+for
+.IR \-\-rpm ,
+or extraction plus
+.I scripts/install.sh
+for
+.IR \-\-tarball )
+.IP "3." 3
+.B sball-addition validate
+\(em a broken hook set aborts the node before the service is touched
+.IP "4." 3
+.B systemctl daemon-reload
+and
+.B systemctl restart sballd.service
+.IP "5." 3
+wait for quorate by polling
+.BR "sball-addition watcher \-\-once"
+.IP "6." 3
+.B sball-node-verify
+(with
+.B \-\-smoke
+when requested)
+.PP
+Nodes are ordered so that the cluster master is rolled out last, which is
+detected by asking every node
+.BR "sball-addition status" .
+The rollout stops at the first failure unless
+.B \-\-continue\-on\-error
+is given.
+.SH OPTIONS
+.SS Target selection
+.TP
+.BI \-\-nodes= spec
+A file with one host per line (blank lines and
+.B #
+comments are ignored) or a comma separated list.
+.TP
+.B \-\-local
+Roll out on this machine only, without ssh.
+.TP
+.B \-\-list
+Print the resolved order and exit. Combine with
+.B \-\-nodes
+to review the plan.
+.SS Artifact
+.TP
+.BI \-\-rpm= file
+Copy this RPM and install it with
+.BR "rpm \-Uvh \-\-replacepkgs" .
+.TP
+.BI \-\-tarball= file
+Copy this tarball, extract it under
+.I /tmp
+and run its
+.IR scripts/install.sh " \-\-with\-systemd" .
+.SS Behaviour
+.TP
+.BI \-\-wait\-quorate= seconds
+How long to wait for a node to report quorate again (default 300).
+.TP
+.B \-\-no\-master\-last
+Keep the given order; do not move the master node to the end.
+.TP
+.B \-\-no\-restart
+Install and verify only; never restart
+.BR sballd.service .
+.TP
+.B \-\-no\-verify
+Skip
+.B sball-node-verify
+at the end of each node.
+.TP
+.B \-\-smoke
+Pass
+.B \-\-smoke
+to
+.BR sball-node-verify ,
+so every node runs a temporary hook.
+.TP
+.B \-\-continue\-on\-error
+Keep going after a node failed (the exit status still reports the failure).
+.TP
+.BI \-\-maintenance= text
+Reason shown in the log lines (for example a change ticket id).
+.TP
+.BI \-\-ssh\-user= user
+Login name for ssh/scp (default root, or
+.BR $SBALL_SSH_USER ).
+.TP
+.BI \-\-ssh\-port= port
+ssh port (default 22, or
+.BR $SBALL_SSH_PORT ).
+.TP
+.BI \-\-ssh\-opt= "options"
+Extra options passed to ssh and scp (or
+.BR $SBALL_SSH_OPTS ).
+.TP
+.B \-\-dry\-run
+Print the plan and every command that would run, and execute nothing. Always
+run this first.
+.TP
+.BR \-v ", " \-\-verbose
+Show the output of every remote command.
+.SH INTERACTION
+When
+.B \-\-dry\-run
+is not given and the service will be restarted, the command asks for a typed
+.B yes
+on a terminal before it touches the first node.
+.SH EXIT STATUS
+.TP
+.B 0
+every node was rolled out and verified
+.TP
+.B 1
+at least one node failed, or the rollout was stopped early
+.TP
+.B 2
+usage error
+.SH EXAMPLES
+Review the order (master last) without doing anything:
+.PP
+.RS
+sball-rollout \-\-nodes=nodes.txt \-\-list
+.RE
+.PP
+Full rollout with checksums verified artifacts:
+.PP
+.RS
+sball-rollout \-\-nodes=nodes.txt \-\-rpm=/root/sball-addition-1.0.0-1.x86_64.rpm \\
+              \-\-maintenance="CHG-12345" \-\-smoke
+.RE
+.PP
+Safe migration where no restart is allowed:
+.PP
+.RS
+sball-rollout \-\-nodes=nodes.txt \-\-rpm=/root/sball-addition.rpm \-\-no\-restart
+.RE
+.SH SEE ALSO
+.BR sball-addition (8),
+.BR sball-node-verify (8),
+.BR sballd-wrapper (8),
+.BR ssh (1),
+.BR systemctl (1)

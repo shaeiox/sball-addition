@@ -1,0 +1,22 @@
+#!/bin/sh
+# postrm - post removal cleanup. State and logs are intentionally kept;
+# remove them with /usr/share/doc/sball-addition or scripts/uninstall.sh.
+set -e
+
+case "$1" in
+    remove|purge)
+        # Drop the ExecStart override so sballd starts the plain daemon again.
+        rm -f /etc/systemd/system/sballd.service.d/sball-addition.conf
+        rmdir /etc/systemd/system/sballd.service.d 2>/dev/null || true
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+        fi
+        if [ "$1" = "purge" ]; then
+            rm -rf /var/lib/sball-addition /var/log/sball-addition /etc/sball-addition
+        fi
+        ;;
+    abort-install|abort-upgrade)
+        ;;
+esac
+
+exit 0

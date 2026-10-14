@@ -1,0 +1,125 @@
+.\" sball-node-verify manual page
+.TH SBALL-NODE-VERIFY 8 "2026-10-14" "sball-addition 1.0.0" "System Administration"
+.SH NAME
+sball-node-verify \- acceptance check for one PVM node running sball-addition
+.SH SYNOPSIS
+.B sball-node-verify
+[\fB\-\-smoke\fR] [\fB\-\-json\fR] [\fB\-\-quiet\fR]
+[\fB\-\-root=\fIdir\fR] [\fB\-\-prefix=\fIdir\fR]
+.SH DESCRIPTION
+.B sball-node-verify
+answers the question that matters before restarting a production node: is this
+host really wired up, and will the hooks run? It inspects the installation and
+exits non-zero when something that matters is broken, which makes it usable as
+a gate in a rollout (see
+.BR sball-rollout (8))
+or in configuration management.
+.PP
+Checks performed:
+.TP
+\(bu
+the
+.B sball-addition
+binary runs and reports its version
+.TP
+\(bu
+the wrapper is installed and looks like
+.BR sballd-wrapper
+.TP
+\(bu
+the optional
+.I /usr/sbin/sballd
+shim and the real daemon
+.RI ( /usr/sbin/sballd.real )
+.TP
+\(bu
+the configuration file and
+.B sball-addition validate
+.TP
+\(bu
+the number of hooks per phase and their headers, ordering and executability
+.TP
+\(bu
+hook and configuration permissions: a group or world writable hook is a
+failure, because hooks execute as root
+.TP
+\(bu
+systemd wiring: the
+.I sballd.service
+drop-in, the watcher unit and whether it is enabled and active
+.TP
+\(bu
+a running watcher process (unit or wrapper spawned)
+.TP
+\(bu
+writability of the state, runtime and log directories, and the last log record
+.TP
+\(bu
+the PVM socket and the quorate state
+.TP
+\(bu
+what the pre-quorate phase would run
+.RB ( "sball-addition run-phase pre-quorate \-\-dry-run" )
+.TP
+\(bu
+with
+.BR \-\-smoke ,
+a real round trip: a temporary post-quorate hook is installed, executed and
+removed again
+.SH OPTIONS
+.TP
+.B \-\-smoke
+Install, run and remove a temporary hook named
+.IR zz-verify-smoke .
+Proves that the runner, state directories and log are functional.
+.TP
+.B \-\-json
+Print one JSON object
+.RB ( ok ", " warnings ", " failures ", " healthy ", " checks )
+instead of the human readable report.
+.TP
+.B \-\-quiet
+Only print warnings, failures and the summary.
+.TP
+.BI \-\-root= dir
+Installation root to check (default
+.B $SBALL_ADDITION_ROOT
+or
+.IR / ).
+.TP
+.BI \-\-prefix= dir
+Prefix of the program paths (default: the root).
+.SH EXIT STATUS
+.TP
+.B 0
+healthy (warnings are allowed, for example a missing shim or a socket that is
+unreachable because the service is intentionally down)
+.TP
+.B 1
+at least one check failed: do not restart this node yet
+.TP
+.B 2
+usage error
+.SH EXAMPLES
+Check the local node and allow a temporary hook to run:
+.PP
+.RS
+sball-node-verify \-\-smoke
+.RE
+.PP
+Feed the result into a rollout or a CI job:
+.PP
+.RS
+sball-node-verify \-\-json | jq \-e .healthy
+.RE
+.PP
+Check an installation inside a test root:
+.PP
+.RS
+sball-node-verify \-\-root=/tmp/stage
+.RE
+.SH SEE ALSO
+.BR sball-addition (8),
+.BR sball-rollout (8),
+.BR sballd-wrapper (8),
+.BR systemctl (1)

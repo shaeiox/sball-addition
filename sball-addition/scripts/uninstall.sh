@@ -107,8 +107,12 @@ if ((KEEP_SERVICES == 0)); then
     if [[ "$ROOT" == "/" ]] && command -v systemctl >/dev/null 2>&1; then
         run systemctl stop sball-addition-watcher.service || true
         run systemctl disable sball-addition-watcher.service || true
+        run systemctl stop sball-addition-metrics.timer || true
+        run systemctl disable sball-addition-metrics.timer || true
     fi
     rm_if_exists "$UNIT_FILE" || info "no watcher unit at $UNIT_FILE"
+    rm_if_exists "$(p "/usr/lib/systemd/system/sball-addition-metrics.service")" || true
+    rm_if_exists "$(p "/usr/lib/systemd/system/sball-addition-metrics.timer")" || true
     if rm_if_exists "$DROPIN"; then
         info "removed $DROPIN (sballd.service starts the plain daemon again after daemon-reload)"
     else
@@ -144,7 +148,13 @@ log ""
 log "removing programs"
 rm_if_exists "$BIN_DIR/sball-addition" || info "no binary at $BIN_DIR/sball-addition"
 rm_if_exists "$BIN_DIR/sballd-wrapper" || true
+rm_if_exists "$BIN_DIR/sball-node-verify" || true
+rm_if_exists "$BIN_DIR/sball-rollout" || true
 rm_if_exists "$SBIN_DIR/sballd-wrapper" || true
+for page in sball-addition sballd-wrapper sball-node-verify sball-rollout; do
+    rm_if_exists "$(p "/usr/share/man/man8/$page.8.gz")" || true
+    rm_if_exists "$(p "/usr/share/man/man8/$page.8")" || true
+done
 rm_if_exists "$(p "/etc/logrotate.d/sball-addition")" || true
 rm_if_exists "$(p "/etc/sysconfig/sball-addition")" || true
 
@@ -185,6 +195,8 @@ leftovers=()
 for path in \
     "$BIN_DIR/sball-addition" \
     "$BIN_DIR/sballd-wrapper" \
+    "$BIN_DIR/sball-node-verify" \
+    "$BIN_DIR/sball-rollout" \
     "$SBIN_DIR/sballd-wrapper" \
     "$CONF_DIR" \
     "$VAR_DIR" \
@@ -192,6 +204,12 @@ for path in \
     "$UNIT_FILE" \
     "$DROPIN"; do
     [[ -e "$path" || -L "$path" ]] && leftovers+=("$path")
+done
+for page in sball-addition sballd-wrapper sball-node-verify sball-rollout; do
+    for ext in ".8" ".8.gz"; do
+        man="$(p "/usr/share/man/man8/$page$ext")"
+        [[ -e "$man" ]] && leftovers+=("$man")
+    done
 done
 if [[ "$ROOT" == "/" ]]; then
     for extra in /etc/sball-addition /var/lib/sball-addition /var/log/sball-addition \

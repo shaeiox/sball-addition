@@ -38,6 +38,7 @@ Highlights:
 8. [Operations](#operations)
 9. [Directory layout](#directory-layout)
 10. [Building, testing, packaging](#building-testing-packaging)
+10b. [Production deployment](#production-deployment)
 11. [Troubleshooting](#troubleshooting)
 12. [Acceptance criteria](#acceptance-criteria)
 13. [Limitations and roadmap](#limitations-and-roadmap)
@@ -45,6 +46,11 @@ Highlights:
 ---
 
 ## Quick start
+
+> Rolling this out on a live cluster? Read **[PRODUCTION.md](PRODUCTION.md)** -
+> build the release bundle, gate every node with `sball-node-verify`, and let
+> `sball-rollout` restart one node at a time, master last, waiting for quorate in
+> between.
 
 ```console
 # one command installation (binary, wrapper, config, samples, systemd units)
@@ -71,6 +77,8 @@ Without an installation you can try everything inside a throw-away root:
 make build
 ./bin/sball-addition --root=/tmp/sball-demo list
 ./bin/sball-addition --root=/tmp/sball-demo watcher --once   # "is the node quorate yet?"
+./bin/sball-addition --root=/tmp/sball-demo run-phase pre-quorate --dry-run
+./scripts/verify-node.sh --root=/tmp/sball-demo --smoke      # is the node ready?
 ```
 
 ---
@@ -144,16 +152,21 @@ sudo ./scripts/install.sh [options]
 The script is idempotent, keeps an existing configuration (saving the old one as
 `*.rpmsave`) and finishes by running `sball-addition validate`.
 
-### RPM
+### RPM / DEB / tarball
 
 ```console
 make tarball          # release/sball-addition-1.0.0.tar.gz (binary + all files)
-make rpm              # needs rpm-build; produces release/sball-addition-*.rpm
+make rpm              # needs rpm-build    -> release/sball-addition-1.0.0-1.x86_64.rpm
+make deb              # needs dpkg-deb only -> release/sball-addition_1.0.0-1_amd64.deb
+make bundle           # all three + SHA256SUMS + deployment notes
 ```
 
-The RPM installs the same tree, ships the systemd unit and the drop-in, and
-**does not** modify `sballd.service` behind your back – the drop-in is a file
-you can delete (and `rpm -e` does exactly that).
+The DEB is built with `dpkg-deb` directly (`packaging/debian/build-deb.sh`), so
+it needs no debhelper and can even be built on a RHEL host. It installs the same
+tree as the RPM (including conffiles, the systemd units, the man pages and the
+`systemd` maintainer script handling) and passes `lintian` without complaints.
+See `packaging/debian/` for the control data and the documented lintian
+overrides (static Go binary, direct `systemctl` calls).
 
 ### Choosing how `sballd` is started
 
@@ -356,8 +369,8 @@ sball-addition [global options] <command> [command options]
 | Command | Purpose |
 |---------|---------|
 | `list [--phase=…] [--json] [--strict]` | hooks in execution order with metadata |
-| `run <name> [--phase=…] [--force] [--no-state] [--quiet]` | run one hook now |
-| `run-phase <phase> [--force] [--quiet] [--json]` | run a whole phase (used by the wrapper) |
+| `run <name> [--phase=…] [--force] [--no-state] [--quiet] [--dry-run]` | run one hook now |
+| `run-phase <phase> [--force] [--quiet] [--json] [--dry-run]` | run a whole phase (used by the wrapper); `--dry-run` reports what would run and executes nothing |
 | `status [--json]` | sballd, watcher, cluster and last hook outcomes |
 | `log [--follow] [--hook=] [--phase=] [--since=] [--level=] [--limit=] [--pretty]` | JSON log queries |
 | `enable` / `disable <name> [--phase=…]` | flip `ENABLED` inside the hook header |
@@ -528,6 +541,7 @@ make integration    # sandboxed end-to-end run (fake PVM socket, needs python3 +
 make install        # install.sh with default options
 make tarball        # release/sball-addition-<version>.tar.gz
 make rpm            # RPM built from that tarball
+make bundle         # + SHA256SUMS and the deployment notes (what you ship)
 make clean
 ```
 
@@ -541,6 +555,76 @@ blocking the start, post-quorate hooks firing < 5 s after quorate, poll timeout,
 complete uninstall (102 assertions).
 
 ---
+
+## Production deployment
+
+The full runbook lives in **[PRODUCTION.md](PRODUCTION.md)**. The short version:
+
+```console
+# 1. build (build host, never on a production node)
+make test && make bundle                  # release/sball-addition-1.0.0-bundle/
+cd release/sball-addition-1.0.0-bundle && sha256sum -c SHA256SUMS
+
+# 2. preview everything (runs nothing)
+sball-addition list
+sball-addition run-phase pre-quorate --dry-run
+sball-addition run-phase post-quorate --dry-run --json
+sball-rollout --nodes=nodes.txt --rpm="$RPM" --dry-run
+
+# 3. canary node
+scp "$RPM" root@node3:/root/
+ssh root@node3 'rpm -Uvh /root/sball-addition-*.rpm && systemctl daemon-reload &&
+                sball-addition validate && sball-node-verify --smoke &&
+                systemctl restart sballd.service && sball-addition watcher --once &&
+                systemctl enable --now sball-addition-watcher.service'
+
+# 4. the rest of the cluster: one node at a time, master last, quorum safe
+sudo sball-rollout --nodes=nodes.txt --rpm="$RPM" --maintenance="CHG-12345" --smoke
+```
+
+Two helpers are installed with the package:
+
+| Command | Purpose |
+|---------|---------|
+| `sball-node-verify [--smoke] [--json] [--root=DIR]` | per-node acceptance gate: binary, config, hooks, permissions, wrapper, systemd wiring, watcher, log, socket, what the pre-quorate phase would run, and (with `--smoke`) a real hook round trip. Exit 1 = do not restart this node. |
+| `sball-rollout` | cluster rollout over ssh: installs the artifact, validates, restarts `sballd`, waits for quorate, verifies, then goes to the next node. Workers first, master last; stops on the first failure; `--dry-run`/`--list` first, always. |
+| `sball-addition metrics` | Prometheus text exposition of the node and hook state (`--out` for node_exporter's textfile collector). Shipped as a `sball-addition-metrics.timer` that runs once a minute. |
+
+Operational guarantees built into the tooling:
+
+* **`--dry-run` everywhere** – `run`, `run-phase` and `sball-rollout` compute the
+  full plan (order, skips, timeouts, retries, commands) without executing
+  anything.
+* **One node at a time** – `sball-rollout` waits for quorate before touching the
+  next node, so a 3+ node cluster stays quorate.
+* **Nothing is hidden** – every decision ends up in the JSON log, and
+  `sball-node-verify` fails loudly on a group/world writable hook (hooks run as
+  root).
+* **Rollback is trivial** – `SBALL_ADDITION_SKIP_WRAPPER=1 systemctl start
+  sballd.service` for one start, `rm /etc/systemd/system/sballd.service.d/sball-addition.conf
+  && systemctl daemon-reload` for good, `scripts/uninstall.sh` for everything.
+
+Ansible users get a template playbook in `deploy/ansible/sball-addition.yml`
+(`serial: 1` + the node verifier as the gate).
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs four jobs on every push and pull request:
+
+| Job | What it proves |
+|-----|----------------|
+| `lint` | `gofmt`, `go vet`, `shellcheck -S warning` over every script and every man page rendering with `groff` |
+| `unit` | `go test -race ./...` |
+| `integration` | the full `make test` suite: 147 assertions against a real sandboxed install, a fake PVM socket and a simulated cluster (fake `ssh`/`scp`), no root needed |
+| `packages` | `make bundle`, `sha256sum -c SHA256SUMS`, `lintian --fail-on error,warning`, install the DEB into a throw-away root and run it, check the RPM file list |
+
+The whole suite is self-contained: no network, no systemd, no root, no PVM
+needed, so it also runs in a container:
+
+```console
+docker run --rm -v "$PWD:/src" -w /src golang:1.23-bookworm \
+    bash -c 'apt-get update -qq && apt-get install -y -qq jq gettext-base make && make test'
+```
 
 ## Troubleshooting
 
@@ -576,11 +660,15 @@ complete uninstall (102 assertions).
 | `status` shows the full state | `internal/cli/cmd_status.go`; integration section 13 |
 | watcher logs an error and exits on poll timeout | `internal/watcher`; integration section 8 (exit 6) |
 | uninstall leaves nothing | `scripts/uninstall.sh`; integration section 18 |
+| safe production rollout | `scripts/verify-node.sh`, `scripts/rollout.sh`; integration section 17b (fake cluster: master last, waits for quorate, stops on failure) |
+| `--dry-run` executes nothing | `internal/runner` (no `exec` on the dry-run path); integration section 17b (marker file proof) |
+| Prometheus metrics | `internal/metrics`, `sball-addition metrics`; integration section 17c + unit tests (windows, omissions, escaping) |
+| packaged and continuously tested | `make bundle` (tarball + RPM + DEB + `SHA256SUMS`), `packaging/debian` (lintian clean), `.github/workflows/ci.yml` |
 
 Unit tests additionally cover the header parser, ordering (including cycles and
 unknown dependencies), the XML-RPC client, the runner (timeouts, retries,
-RUN_ONCE, targets, environment), the JSON logger, the file lock and the flag
-parser.
+RUN_ONCE, targets, environment, dry-run), the JSON logger, the file lock, the
+metrics renderer/collector and the flag parser.
 
 ---
 

@@ -153,6 +153,14 @@ func Run(args []string) int {
 	}
 
 	cmd, cmdArgs := rest[0], rest[1:]
+
+	// "sball-addition <command> --help" behaves like "sball-addition help".
+	if wantsHelp(cmdArgs) {
+		fmt.Fprintf(a.Stdout, "%s %s\n\n", version.Name, cmd)
+		a.printUsage(a.Stdout)
+		return ExitOK
+	}
+
 	switch cmd {
 	case "list", "ls":
 		return a.cmdList(cmdArgs)
@@ -174,6 +182,8 @@ func Run(args []string) int {
 		return a.cmdUninstallHook(cmdArgs)
 	case "validate":
 		return a.cmdValidate(cmdArgs)
+	case "metrics", "export-metrics":
+		return a.cmdMetrics(cmdArgs)
 	case "watcher":
 		return a.cmdWatcher(cmdArgs)
 	case "version":
@@ -190,6 +200,20 @@ func Run(args []string) int {
 	}
 }
 
+// wantsHelp reports whether the arguments ask for help. Flags after "--" are
+// treated as positional data, exactly like in the flag parser.
+func wantsHelp(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		if arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) printUsage(w io.Writer) {
 	fmt.Fprintf(w, `%s %s - hook system for the sballd (PVM) service
 
@@ -198,9 +222,9 @@ usage: %s [global options] <command> [command options]
 commands:
   list [--phase=<phase>] [--json]
         show every hook with its metadata in execution order
-  run <hook-name> [--phase=<phase>] [--force] [--no-state] [--quiet]
+  run <hook-name> [--phase=<phase>] [--force] [--no-state] [--quiet] [--dry-run]
         run a single hook (respects TIMEOUT/RETRY/TARGET/RUN_ONCE)
-  run-phase <phase> [--force] [--quiet] [--json]
+  run-phase <phase> [--force] [--quiet] [--json] [--dry-run]
         run every hook of a phase (used by sballd-wrapper)
   status [--json]
         show sballd, watcher, cluster and hook state
@@ -216,6 +240,8 @@ commands:
         remove a hook and its RUN_ONCE state
   validate [--phase=<phase>]
         check the configuration and every hook header
+  metrics [--out=<file>] [--no-socket] [--json]
+        Prometheus text exposition of the node/hook state (textfile collector)
   watcher [--foreground] [--once] [--poll-interval=<s>] [--poll-timeout=<s>]
         wait for the quorate state and run the post-quorate hooks
   version [--json]

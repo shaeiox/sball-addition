@@ -1,0 +1,16 @@
+#!/bin/sh
+# prerm - stop the units before removing/unpacking the package.
+set -e
+
+case "$1" in
+    remove|deconfigure)
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl stop sball-addition-metrics.timer >/dev/null 2>&1 || true
+            systemctl disable sball-addition-metrics.timer >/dev/null 2>&1 || true
+            systemctl stop sball-addition-watcher.service >/dev/null 2>&1 || true
+            systemctl disable sball-addition-watcher.service >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+exit 0

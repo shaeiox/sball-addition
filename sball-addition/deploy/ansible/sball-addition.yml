@@ -1,0 +1,136 @@
+---
+# Template playbook for rolling sball-addition out with Ansible.
+#
+# It does what "sball-rollout" does locally, using native Ansible modules and
+# therefore proper serialisation: `serial: 1` restarts one node at a time and
+# waits for the post-quorate hooks before moving on.
+#
+#   ansible-playbook -i inventory deploy/ansible/sball-addition.yml \
+#       -e install_rpm=/root/sball-addition-1.0.0-1.x86_64.rpm
+#
+# Adjust `serial`, the hook files and the group names to your cluster. The
+# verifier step is the gate: the play fails on a node that is not ready instead
+# of restarting a broken sballd.
+- name: Deploy sball-addition to the PVM cluster
+  hosts: pvm_cluster
+  become: true
+  serial: 1                 # never touch two nodes at once (quorum!)
+  any_errors_fatal: true    # stop the rollout when a node fails
+  vars:
+    install_rpm: ""         # e.g. /root/sball-addition-1.0.0-1.x86_64.rpm
+    install_tarball: ""     # or a tarball, mutually exclusive with install_rpm
+    restart_sballd: true
+    wait_quorate_seconds: 300
+    hook_source_dir: ""     # optional: a local directory with your own hooks
+    monitoring_url: ""
+
+  tasks:
+    - name: Ensure python is available for Ansible modules
+      ansible.builtin.raw: test -e /usr/bin/python3 || test -e /usr/libexec/platform-python
+      changed_when: false
+
+    - name: Check whether sball-addition is installed already
+      ansible.builtin.command: sball-addition version
+      register: existing_version
+      changed_when: false
+      failed_when: false
+
+    - name: Show the installed version
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ existing_version.stdout | default('not installed') }}"
+
+    - name: Copy the RPM
+      ansible.builtin.copy:
+        src: "{{ install_rpm }}"
+        dest: /root/
+        mode: "0644"
+      when: install_rpm | length > 0
+
+    - name: Install the RPM
+      ansible.builtin.dnf:
+        name: "/root/{{ install_rpm | basename }}"
+        disable_gpg_check: true
+        state: present
+      when: install_rpm | length > 0
+
+    - name: Copy and unpack the tarball
+      when: install_tarball | length > 0
+      block:
+        - name: Copy the tarball
+          ansible.builtin.copy:
+            src: "{{ install_tarball }}"
+            dest: /root/
+            mode: "0644"
+        - name: Unpack the tarball
+          ansible.builtin.unarchive:
+            src: "/root/{{ install_tarball | basename }}"
+            dest: /root/
+            remote_src: true
+        - name: Run the installer
+          ansible.builtin.command:
+            cmd: "/root/{{ install_tarball | basename | regex_replace('\\.tar\\.gz$', '') }}/scripts/install.sh --with-systemd --enable-service"
+            creates: /usr/bin/sballd-wrapper
+
+    - name: Deploy your own hooks
+      ansible.builtin.copy:
+        src: "{{ hook_source_dir }}/"
+        dest: /etc/sball-addition/hooks.d/
+        mode: "0755"
+        owner: root
+        group: root
+      when: hook_source_dir | length > 0
+      register: hooks_copied
+
+    - name: Configure the monitoring endpoint
+      ansible.builtin.lineinfile:
+        path: /etc/sysconfig/sball-addition
+        regexp: "^#?SBALL_MONITORING_URL="
+        line: "SBALL_MONITORING_URL={{ monitoring_url }}"
+        create: true
+        mode: "0644"
+      when: monitoring_url | length > 0
+
+    - name: Validate the configuration and the hook headers
+      ansible.builtin.command: sball-addition validate
+      changed_when: false
+
+    - name: Show what the next start would run
+      ansible.builtin.command: sball-addition run-phase pre-quorate --dry-run
+      changed_when: false
+
+    - name: Reload systemd and restart the service
+      when: restart_sballd | bool
+      block:
+        - name: Verify the node before restarting it
+          ansible.builtin.command: sball-node-verify --quiet
+          changed_when: false
+
+        - name: Restart sballd
+          ansible.builtin.systemd_service:
+            name: sballd.service
+            state: restarted
+            daemon_reload: true
+
+        - name: Wait for the node to become quorate
+          ansible.builtin.command: sball-addition watcher --once
+          register: quorate
+          until: quorate.rc == 0
+          retries: "{{ (wait_quorate_seconds | int / 5) | int }}"
+          delay: 5
+          changed_when: false
+
+    - name: Keep the post-quorate watcher running
+      ansible.builtin.systemd_service:
+        name: sball-addition-watcher.service
+        enabled: true
+        state: restarted
+        daemon_reload: true
+
+    - name: Final verification (with a real hook round trip)
+      ansible.builtin.command: sball-node-verify --smoke
+      changed_when: false
+      register: verify
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ verify.stdout_lines | last }}"

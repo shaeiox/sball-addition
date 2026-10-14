@@ -15,6 +15,12 @@
 # Emergency switch: set to 1 to start sballd without running any hook.
 #SBALL_ADDITION_SKIP_WRAPPER=0
 
+# Prometheus exporter (sball-addition-metrics.timer). Point it at your
+# node_exporter textfile collector directory, or leave it unset to log to the
+# journal. Scrape the file with:
+#   node_textfile_mtime_seconds  /  sball_addition_*  series
+#SBALL_METRICS_ARGS=--out /var/lib/node_exporter/textfile_collector/sball-addition.prom
+
 # Values handed to hooks (optional, sample hooks read them):
 #SBALL_STORAGE_MOUNT=/var/lib/pvm-storage
 #SBALL_STORAGE_DEVICE=/dev/mapper/pvm-storage

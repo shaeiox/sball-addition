@@ -16,6 +16,7 @@ func (a *App) cmdRun(args []string) int {
 	phaseStr := f.String("phase", "", "phase of the hook (disambiguates a duplicate name)")
 	force := f.Bool("force", false, "ignore the RUN_ONCE state file")
 	noState := f.Bool("no-state", false, "do not touch state/runtime files")
+	dryRun := f.Bool("dry-run", false, "show what would run without executing")
 	quiet := f.Bool("quiet", false, "do not mirror the hook output")
 	if err := f.Parse(); err != nil {
 		return a.usageError("run", err)
@@ -62,6 +63,7 @@ func (a *App) cmdRun(args []string) int {
 		DefaultTimeout: cfg.General.DefaultTimeout,
 		PhaseOnFailure: a.phasePolicy(cfg, found.Phase),
 		Force:          *force,
+		DryRun:         *dryRun,
 		Env:            a.clusterEnv(cfg, lg),
 		Logger:         lg,
 		Stream:         !*quiet,
@@ -88,6 +90,7 @@ func (a *App) cmdRunPhase(args []string) int {
 	force := f.Bool("force", false, "ignore RUN_ONCE state files")
 	quiet := f.Bool("quiet", false, "do not mirror hook output")
 	asJSON := f.Bool("json", false, "print a machine readable summary")
+	dryRun := f.Bool("dry-run", false, "show what would run without executing")
 	if err := f.Parse(); err != nil {
 		return a.usageError("run-phase", err)
 	}
@@ -149,6 +152,7 @@ func (a *App) cmdRunPhase(args []string) int {
 		DefaultTimeout: cfg.General.DefaultTimeout,
 		PhaseOnFailure: a.phasePolicy(cfg, phase),
 		Force:          *force,
+		DryRun:         *dryRun,
 		Env:            a.clusterEnv(cfg, lg),
 		Logger:         lg,
 		Stream:         !*quiet,
@@ -161,7 +165,7 @@ func (a *App) cmdRunPhase(args []string) int {
 		a.printJSON(summaryJSON(sum))
 	} else {
 		for _, res := range sum.Results {
-			if res.Skipped {
+			if res.Skipped && res.SkipReason != runner.SkipDryRun {
 				continue
 			}
 			a.printResult(res)
@@ -185,6 +189,10 @@ func (a *App) cmdRunPhase(args []string) int {
 func (a *App) printResult(res *runner.Result) {
 	name := string(res.Hook.Phase) + "/" + res.Hook.Name
 	switch {
+	case res.SkipReason == runner.SkipDryRun:
+		fmt.Fprintf(a.Stdout, "%s: would run (timeout %ds, up to %d attempt(s), ON_FAIL=%s)\n",
+			name, res.Hook.EffectiveTimeout(a.cfg.General.DefaultTimeout), res.Hook.Retry+1,
+			res.Hook.EffectiveOnFail(a.phasePolicy(a.cfg, res.Hook.Phase)))
 	case res.Skipped:
 		fmt.Fprintf(a.Stdout, "%s: SKIP (%s)\n", name, res.SkipReason)
 	case res.Err == nil:

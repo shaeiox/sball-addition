@@ -239,11 +239,32 @@ for path in \
     "$ROOT/var/log/sball-addition" \
     "$ROOT/usr/lib/systemd/system/sball-addition-watcher.service" \
     "$ROOT/etc/systemd/system/sballd.service.d/sball-addition.conf" \
-    "$ROOT/etc/logrotate.d/sball-addition"; do
+    "$ROOT/etc/logrotate.d/sball-addition" \
+    "$ROOT/usr/share/man/man8/sball-addition.8.gz" \
+    "$ROOT/usr/lib/systemd/system/sball-addition-metrics.timer"; do
     [[ -e "$path" ]] && ok "installed $(basename "$path")" || no "installed $path"
 done
 
 write_config "$PRIMARY_PORT"
+
+# A production node has no Go toolchain: the release tarball's prebuilt binary
+# must be picked up without --binary=.
+run_cmd env PATH=/usr/bin:/bin "$REPO/scripts/install.sh" --root="$SANDBOX/prebuilt" --no-samples
+if [[ "$RC" == 0 && -x "$SANDBOX/prebuilt/usr/bin/sball-addition" ]]; then
+    ok "install.sh uses the prebuilt binary when there is no Go toolchain"
+else
+    no "install.sh uses the prebuilt binary when there is no Go toolchain" "rc=$RC
+$OUT"
+fi
+run_cmd env PATH=/usr/bin:/bin "$REPO/scripts/install.sh" --root="$SANDBOX/prebuilt-nobin" \
+    --binary="$SANDBOX/does-not-exist"
+if [[ "$RC" != 0 ]]; then
+    ok "install.sh still refuses to install without a usable binary"
+else
+    no "install.sh still refuses to install without a usable binary" "rc=$RC
+$OUT"
+fi
+run_cmd bash -c 'rm -rf "$1"' _ "$SANDBOX/prebuilt" "$SANDBOX/prebuilt-nobin"
 
 section "2. install-hook / list"
 install_hook pre-quorate resource-check '# DESCRIPTION: pre hook
@@ -545,6 +566,195 @@ wait "$W1" 2>/dev/null
 sleep 0.3
 echo quorate >"$SANDBOX/state"
 ok "lock released after the first watcher stopped"
+
+section "17b. production tooling (sball-node-verify, sball-rollout)"
+# --- sball-node-verify ------------------------------------------------------
+run_cmd "$REPO/scripts/verify-node.sh" --root="$ROOT" --quiet
+if [[ "$RC" == 0 ]]; then
+    ok "sball-node-verify reports the node ready"
+else
+    no "sball-node-verify reports the node ready" "$OUT"
+fi
+check_zero "sball-node-verify --smoke passes" "$REPO/scripts/verify-node.sh" --root="$ROOT" --smoke --quiet
+check_zero "sball-node-verify --json passes" "$REPO/scripts/verify-node.sh" --root="$ROOT" --json
+if printf '%s' "$OUT" | jq -e '.healthy == true and .failures == 0' >/dev/null 2>&1; then
+    ok "sball-node-verify --json is valid JSON with the expected fields"
+else
+    no "sball-node-verify --json is valid JSON with the expected fields" "$OUT"
+fi
+if "$REPO/scripts/verify-node.sh" --root="$ROOT" --smoke --quiet | grep -q "zz-verify-smoke"; then
+    no "the smoke test cleans up after itself"
+else
+    ok "the smoke test cleans up after itself"
+fi
+
+# a hook that anyone can modify must fail the permission gate
+chmod 0666 "$ROOT"/etc/sball-addition/hooks.d/post-quorate.d/10-network-check.sh
+run_cmd "$REPO/scripts/verify-node.sh" --root="$ROOT" --quiet
+if [[ "$RC" == 1 ]]; then
+    ok "a group/world writable hook fails the verification (exit 1)"
+else
+    no "a group/world writable hook fails the verification (exit 1)" "rc=$RC
+$OUT"
+fi
+check_contains "the permission problem is named" "$OUT" "hook permissions"
+chmod 0755 "$ROOT"/etc/sball-addition/hooks.d/post-quorate.d/10-network-check.sh
+check_zero "the node is ready again after fixing the mode" "$REPO/scripts/verify-node.sh" --root="$ROOT" --quiet
+
+# --- dry run never executes -------------------------------------------------
+clear_hooks
+marker="$ROOT/var/lib/sball-addition/runtime/dry-run-marker"
+install_hook pre-quorate dry-run-probe '' 'touch "'"$marker"'"'
+check_zero "run-phase --dry-run succeeds" cli run-phase pre-quorate --dry-run
+check_contains "the dry run reports what would run" "$OUT" "would run"
+[[ ! -f "$marker" ]] && ok "the dry run did not execute the hook" || no "the dry run did not execute the hook"
+check_zero "the dry run also ran the real phase afterwards" cli run-phase pre-quorate --quiet
+[[ -f "$marker" ]] && ok "the same hook runs for real afterwards" || no "the same hook runs for real afterwards"
+remove_hook pre-quorate dry-run-probe
+
+# --- sball-rollout against a fake cluster -----------------------------------
+FAKE_BIN="$SANDBOX/fakebin"
+mkdir -p "$FAKE_BIN"
+cat >"$FAKE_BIN/ssh" <<'FAKESSH'
+#!/bin/bash
+log="${FAKE_SSH_LOG:-/tmp/fake-ssh.log}"
+args=("$@")
+target="${args[$((${#args[@]} - 2))]}"
+cmd="${args[$((${#args[@]} - 1))]}"
+host="${target#*@}"
+printf '%s|%s\n' "$host" "$cmd" >>"$log"
+case "$cmd" in
+    *"command -v sball-addition"*) exit 0 ;;
+    *"sball-addition version"*) echo "sball-addition 1.0.0 (test)" ;;
+    *this\ node*) [[ "$host" == "master1" ]] && echo 1 || echo 0 ;;
+    *"sball-addition status"*)
+        if [[ "$host" == "master1" ]]; then
+            echo "  Cluster Master: node 1 (master1) [this node]"
+        else
+            echo "  Cluster Master: node 1 (master1)"
+        fi
+        ;;
+    *sball-node-verify*) [[ "$host" == "bad-node" ]] && { echo "[FAIL] watcher not running"; exit 1; } || exit 0 ;;
+    *"watcher --once"*) [[ "$host" == "bad-node" ]] && exit 6 || exit 0 ;;
+    *) exit 0 ;;
+esac
+FAKESSH
+cat >"$FAKE_BIN/scp" <<'FAKECP'
+#!/bin/bash
+printf 'scp %s\n' "$*" >>"${FAKE_SSH_LOG:-/tmp/fake-ssh.log}"
+exit 0
+FAKECP
+chmod +x "$FAKE_BIN/ssh" "$FAKE_BIN/scp"
+FAKE_RPM="$SANDBOX/sball-addition-1.0.0-1.x86_64.rpm"
+cp "$REPO"/release/*.rpm "$FAKE_RPM" 2>/dev/null || printf 'dummy rpm\n' >"$FAKE_RPM"
+export FAKE_SSH_LOG="$SANDBOX/fake-ssh.log"
+export PATH="$FAKE_BIN:$PATH"
+
+rm -f "$FAKE_SSH_LOG"
+run_cmd "$REPO/scripts/rollout.sh" --nodes=master1,node3,node2 --list
+if [[ "$(printf '%s\n' "$OUT" | tail -1)" == "master1" ]]; then
+    ok "sball-rollout rolls the master out last"
+else
+    no "sball-rollout rolls the master out last" "$OUT"
+fi
+
+run_cmd "$REPO/scripts/rollout.sh" --nodes=master1,node3,node2 --rpm="$FAKE_RPM" --smoke
+if [[ "$RC" == 0 ]]; then
+    ok "sball-rollout completes on a healthy cluster"
+else
+    no "sball-rollout completes on a healthy cluster" "rc=$RC
+$OUT"
+fi
+RESTARTS=$(grep -c 'systemctl daemon-reload && systemctl restart sballd.service' "$FAKE_SSH_LOG")
+if [[ "$RESTARTS" == "3" ]]; then
+    ok "every node was restarted exactly once"
+else
+    no "every node was restarted exactly once" "restart commands in the log: $RESTARTS"
+fi
+LAST_RESTART_HOST=$(grep 'systemctl daemon-reload && systemctl restart sballd.service' "$FAKE_SSH_LOG" | tail -1 | cut -d'|' -f1)
+if [[ "$LAST_RESTART_HOST" == "master1" ]]; then
+    ok "the master was restarted last"
+else
+    no "the master was restarted last" "last restart was on $LAST_RESTART_HOST"
+fi
+grep -q 'scp .*sball-addition-1.0.0-1.x86_64.rpm' "$FAKE_SSH_LOG" &&
+    ok "the artifact was distributed before the restart" ||
+    no "the artifact was distributed before the restart"
+grep -q 'rpm -Uvh' "$FAKE_SSH_LOG" && ok "the RPM was installed on the nodes" || no "the RPM was installed on the nodes"
+grep -q 'watcher --once' "$FAKE_SSH_LOG" && ok "the rollout waited for quorate" || no "the rollout waited for quorate"
+grep -q 'sball-node-verify --smoke' "$FAKE_SSH_LOG" && ok "the rollout ran the node verification" ||
+    no "the rollout ran the node verification"
+
+# failure path: a node that never becomes quorate stops the rollout
+rm -f "$FAKE_SSH_LOG"
+run_cmd "$REPO/scripts/rollout.sh" --nodes=node1,bad-node,node2 --wait-quorate=5
+if [[ "$RC" == 1 ]]; then
+    ok "a stuck node fails the rollout (exit 1)"
+else
+    no "a stuck node fails the rollout (exit 1)" "rc=$RC
+$OUT"
+fi
+check_contains "the rollout says it stopped" "$OUT" "stopping the rollout"
+if grep -E '^node2\|.*(restart sballd|watcher --once|sball-node-verify)' "$FAKE_SSH_LOG" >/dev/null; then
+    no "the nodes after the failure were not touched" "$(grep '^node2' "$FAKE_SSH_LOG")"
+else
+    ok "the nodes after the failure were not touched (only the order probe asked for its status)"
+fi
+
+# dry run touches nothing
+rm -f "$FAKE_SSH_LOG"
+run_cmd "$REPO/scripts/rollout.sh" --nodes=master1,node3 --dry-run
+if [[ "$RC" == 0 && ! -s "$FAKE_SSH_LOG" ]]; then
+    ok "sball-rollout --dry-run runs nothing"
+else
+    no "sball-rollout --dry-run runs nothing" "rc=$RC, fake ssh log: $(cat "$FAKE_SSH_LOG" 2>/dev/null | head -3)"
+fi
+unset FAKE_SSH_LOG
+PATH=${PATH#"$FAKE_BIN:"}
+
+section "17c. Prometheus metrics exporter"
+check_zero "metrics exits 0" cli metrics
+check_contains "metrics prints the exposition format" "$OUT" "# TYPE sball_addition_info gauge"
+check_contains "the identity line carries host, version and config" "$OUT" 'sball_addition_info{config='
+check_contains "the version is exposed" "$OUT" 'version="' 
+if printf '%s\n' "$OUT" | grep -qE '^# HELP sball_addition_[a-z_]+ ' && \
+    ! printf '%s\n' "$OUT" | grep -vE '^($|#)' | grep -qvE '^sball_addition_[a-z_]+\{?'; then
+    ok "every sample line is a valid metric name"
+else
+    no "every sample line is a valid metric name" "$(printf '%s\n' "$OUT" | grep -vE '^($|#)' | grep -vE '^sball_addition_' | head -3)"
+fi
+check_zero "metrics --json exits 0" cli metrics --json
+if printf '%s' "$OUT" | jq -e . >/dev/null 2>&1; then
+    ok "metrics --json is parseable (jq)"
+else
+    no "metrics --json is parseable (jq)" "$(printf '%s' "$OUT" | jq -e . 2>&1 | head -3)"
+fi
+check_contains "the JSON carries the same state" "$OUT" '"quorate"'
+METRICS_DIR="$SANDBOX/textfile"
+run_cmd bash -c 'rm -rf "$1"' _ "$METRICS_DIR"
+check_zero "metrics --out writes a textfile (and creates the directory)" \
+    cli metrics --out="$METRICS_DIR/sball-addition.prom"
+if [[ -s "$METRICS_DIR/sball-addition.prom" ]]; then
+    ok "the textfile is non-empty"
+else
+    no "the textfile is non-empty"
+fi
+check_zero "the file the exporter wrote is readable with promtool syntax rules" bash -c \
+    'grep -q "^# TYPE sball_addition_hooks gauge" "$1"' _ "$METRICS_DIR/sball-addition.prom"
+if [[ -z "$(find "$METRICS_DIR" -name '*.tmp' -o -name '*.partial' | head -1)" ]]; then
+    ok "the write is atomic (no temporary files left behind)"
+else
+    no "the write is atomic (no temporary files left behind)"
+fi
+run_cmd cli metrics --out="$METRICS_DIR/silent.prom"
+if [[ "$RC" == 0 && -z "$OUT" ]]; then
+    ok "metrics --out writes the file and stays quiet on stdout"
+else
+    no "metrics --out writes the file and stays quiet on stdout" "rc=$RC out=$OUT"
+fi
+check_zero "the socket can be skipped" cli metrics --no-socket
+check_not_contains "no socket means no reachability samples" "$OUT" "pvm_socket_reachable"
+check_zero "export-metrics is an alias" cli export-metrics
 
 section "18. complete uninstall"
 run_cmd "$REPO/scripts/uninstall.sh" --root="$ROOT"

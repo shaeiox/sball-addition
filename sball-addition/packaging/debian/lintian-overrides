@@ -1,0 +1,16 @@
+# The maintainer scripts call systemctl directly instead of using
+# deb-systemd-helper, because sball-addition ships right next to the vendor
+# supplied sballd.service and must work the same way on RHEL and Debian.
+# Everything is guarded by "command -v systemctl" and failures are ignored.
+sball-addition: maintainer-script-calls-systemctl
+# bin/sball-addition is a static Go binary built with CGO_ENABLED=0, so there is
+# no libc dependency to declare and the usual hardening flags (PIE, BIND_NOW,
+# init/fini arrays) are provided by the Go runtime instead of the compiler
+# wrapper. build-deb.sh strips the binary and passes -X flags for the version.
+sball-addition: statically-linked-binary
+sball-addition: missing-dependency-on-libc
+sball-addition: hardening-no-pie
+sball-addition: hardening-no-relro
+sball-addition: unstripped-binary-or-object
+# Not uploaded to the Debian archive, so there is no bug number to close.
+sball-addition: initial-upload-closes-no-bugs

@@ -117,13 +117,19 @@ info "state:       $STATE_DIR"
 
 # ---------------------------------------------------------------- build -----
 if [[ -z "$BINARY" ]]; then
-    if command -v make >/dev/null 2>&1 && command -v go >/dev/null 2>&1; then
+    # A release tarball ships a prebuilt, statically linked binary: use it so a
+    # production node needs neither Go nor make.
+    if [[ -x "$REPO_DIR/bin/sball-addition" ]]; then
+        log ""
+        log "using the prebuilt binary from the release ($REPO_DIR/bin/sball-addition)"
+        BINARY="$REPO_DIR/bin/sball-addition"
+    elif command -v make >/dev/null 2>&1 && command -v go >/dev/null 2>&1; then
         log ""
         log "building the binary (make build)"
         run make -C "$REPO_DIR" build
         BINARY="$REPO_DIR/bin/sball-addition"
     else
-        die "neither --binary=FILE nor a Go toolchain was provided"
+        die "neither --binary=FILE nor a prebuilt bin/sball-addition nor a Go toolchain was provided"
     fi
 fi
 [[ -f "$BINARY" ]] || die "binary '$BINARY' not found"
@@ -137,11 +143,33 @@ run install -d -m 0755 "$(p "/var/lib/sball-addition")" "$STATE_DIR" \
     "$STATE_DIR/pre-quorate" "$STATE_DIR/post-quorate" "$RUNTIME_DIR"
 run install -d -m 0755 "$LOG_DIR"
 
+# ----------------------------------------------------------------- man ------
+log ""
+log "installing the man pages"
+MAN_DIR="$PREFIX/usr/share/man/man8"
+run install -d -m 0755 "$MAN_DIR"
+for page in sball-addition sballd-wrapper sball-node-verify sball-rollout; do
+    src="$REPO_DIR/docs/$page.8"
+    [[ -f "$src" ]] || continue
+    if command -v gzip >/dev/null 2>&1; then
+        if ((DRY_RUN)); then
+            info "[dry-run] gzip -9n -c $src > $MAN_DIR/$page.8.gz"
+        else
+            gzip -9n -c "$src" >"$MAN_DIR/$page.8.gz"
+            chmod 0644 "$MAN_DIR/$page.8.gz"
+        fi
+    else
+        run install -m 0644 "$src" "$MAN_DIR/$page.8"
+    fi
+done
+
 # ---------------------------------------------------------------- files -----
 log ""
 log "installing the binary and the wrapper"
 run install -m 0755 "$BINARY" "$BIN_DIR/sball-addition"
 run install -m 0755 "$REPO_DIR/scripts/sballd-wrapper" "$BIN_DIR/sballd-wrapper"
+run install -m 0755 "$REPO_DIR/scripts/verify-node.sh" "$BIN_DIR/sball-node-verify"
+run install -m 0755 "$REPO_DIR/scripts/rollout.sh" "$BIN_DIR/sball-rollout"
 if [[ "$SBIN_DIR" != "$BIN_DIR" ]]; then
     run install -m 0755 "$REPO_DIR/scripts/sballd-wrapper" "$SBIN_DIR/sballd-wrapper"
 fi
@@ -213,6 +241,10 @@ if ((WITH_SYSTEMD)); then
         "$UNIT_DIR/sball-addition-watcher.service"
     run install -m 0644 "$REPO_DIR/packaging/systemd/sballd.service.d/sball-addition.conf" \
         "$DROPIN_DIR/sball-addition.conf"
+run install -m 0644 "$REPO_DIR/packaging/systemd/sball-addition-metrics.service" \
+        "$UNIT_DIR/sball-addition-metrics.service"
+run install -m 0644 "$REPO_DIR/packaging/systemd/sball-addition-metrics.timer" \
+        "$UNIT_DIR/sball-addition-metrics.timer"
 fi
 
 if ((SHIM_SBALLD)); then
@@ -262,6 +294,7 @@ info "next steps:"
 info "  sball-addition list"
 info "  sball-addition status"
 info "  sball-addition validate"
+info "  sball-node-verify --smoke      # is this node ready for a restart?"
 if ((WITH_SYSTEMD)); then
     info "  systemctl daemon-reload && systemctl restart sballd.service"
 else

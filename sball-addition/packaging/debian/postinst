@@ -1,0 +1,43 @@
+#!/bin/sh
+# postinst - runs after (re)installing sball-addition.
+#
+# It only reloads systemd so the shipped units and the sballd.service drop-in
+# are known. Nothing is started or enabled automatically: an operator decides
+# when the service may be restarted.
+set -e
+
+case "$1" in
+    configure)
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+        fi
+        cat <<'BANNER'
+
+sball-addition installed.
+
+  1. install or write hooks:
+       /etc/sball-addition/hooks.d/pre-quorate.d/
+       /etc/sball-addition/hooks.d/post-quorate.d/
+     verify them with:  sball-addition validate && sball-addition list
+     check the node:    sball-node-verify --smoke
+
+  2. run the pre/post hooks with the service (the ExecStart drop-in is in
+     place, so a restart is enough):
+       systemctl daemon-reload && systemctl restart sballd.service
+
+  3. keep the post-quorate watcher alive across sballd restarts:
+       systemctl enable --now sball-addition-watcher.service
+
+  4. optional Prometheus metrics (node_exporter textfile collector):
+       echo 'SBALL_METRICS_ARGS=--out /var/lib/node_exporter/textfile_collector/sball-addition.prom' \
+           >> /etc/sysconfig/sball-addition
+       systemctl enable --now sball-addition-metrics.timer
+
+  logs: /var/log/sball-addition/sball-addition.log (JSON, jq friendly)
+  deploy: /usr/share/doc/sball-addition/PRODUCTION.md
+
+BANNER
+        ;;
+esac
+
+exit 0

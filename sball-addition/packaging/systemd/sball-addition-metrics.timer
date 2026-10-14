@@ -1,0 +1,14 @@
+[Unit]
+Description=Collect sball-addition metrics for Prometheus
+Documentation=man:sball-addition(8)
+
+[Timer]
+# The exporter is stateless and cheap (a few ms); once a minute keeps graphs
+# and alerts fresh without any measurable load.
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=5s
+Unit=sball-addition-metrics.service
+
+[Install]
+WantedBy=timers.target

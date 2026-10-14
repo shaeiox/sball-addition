@@ -27,6 +27,7 @@ const (
 	SkipNotMaster   = "target-master-not-master"
 	SkipFilter      = "filtered-out"
 	SkipPhaseOff    = "phase-disabled"
+	SkipDryRun      = "dry-run"
 )
 
 // Environment variable names exported to every hook.
@@ -67,6 +68,7 @@ type Options struct {
 	DefaultTimeout int
 	PhaseOnFailure string // abort | continue (from the phase config section)
 	Force          bool   // ignore RUN_ONCE markers
+	DryRun         bool   // resolve and report what would run, but do not execute
 	Env            Env
 	Logger         *log.Logger
 	Stream         bool      // mirror hook stdout/stderr to Stdout/Stderr
@@ -315,6 +317,24 @@ func (r *Runner) RunOne(ctx context.Context, h *hook.Meta) *Result {
 			log.String("phase", string(h.Phase)),
 			log.String("hook", h.Name),
 		)
+	}
+
+	// --- dry run ----------------------------------------------------------
+	if r.opt.DryRun {
+		r.log.Info("dry_run",
+			log.String("phase", string(h.Phase)),
+			log.String("hook", h.Name),
+			log.String("host", r.opt.Env.Hostname),
+			log.String("target", string(h.Target)),
+			log.Int("timeout", timeout),
+			log.Int("max_attempts", h.Retry+1),
+			log.Int("backoff_seconds", h.RetryBackoff),
+			log.String("on_fail", h.EffectiveOnFail(r.opt.PhaseOnFailure)),
+			log.String("file", h.Path),
+		)
+		res.Skipped, res.SkipReason = true, SkipDryRun
+		res.Duration = r.now().Sub(res.Started)
+		return res
 	}
 
 	// --- execution --------------------------------------------------------

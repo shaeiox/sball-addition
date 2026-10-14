@@ -1,4 +1,3 @@
-#!/bin/bash
 # shellcheck shell=bash
 #
 # common.sh - helper library shared by sball-addition hooks.
@@ -159,7 +158,7 @@ sball_wait_for() {
 # sball_env_dump - debug helper: log every SBALL_* variable.
 sball_env_dump() {
     local v
-    while IFS= read -r v; do
+    while IFS= read -r v || [[ -n "$v" ]]; do
         sball_debug "$v"
     done < <(env | grep '^SBALL_' | sort)
 }

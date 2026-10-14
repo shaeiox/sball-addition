@@ -1,0 +1,74 @@
+sball-addition ${VERSION} - production deployment notes
+=========================================================
+
+built:  ${BUILDDATE}
+commit: ${COMMIT}
+
+Contents
+--------
+  sball-addition-${VERSION}.tar.gz           self-contained bundle
+                                             (binary + installer + hooks + systemd)
+  sball-addition-${VERSION}-1.<arch>.rpm     RPM for RHEL/CentOS 7+
+  sball-addition_${VERSION}-1_<arch>.deb     DEB for Debian/Ubuntu
+  README-DEPLOY.md                           the deployment runbook (PRODUCTION.md)
+  SHA256SUMS                                 checksums of the files above
+
+Verify before you ship anything to production
+--------------------------------------------
+  sha256sum -c SHA256SUMS
+
+Install on one node (canary)
+----------------------------
+  # RPM (recommended on RHEL/CentOS)
+  rpm -Uvh sball-addition-${VERSION}-1.x86_64.rpm
+  systemctl daemon-reload
+
+  # or the DEB
+  dpkg -i sball-addition_${VERSION}-1_amd64.deb
+
+  # or the tarball (any distribution)
+  tar -xzf sball-addition-${VERSION}.tar.gz -C /root/
+  /root/sball-addition-${VERSION}/scripts/install.sh --with-systemd --enable-service
+
+Then, on every node
+-------------------
+  1. check the hooks that would run:   sball-addition list
+                                       sball-addition run-phase pre-quorate --dry-run
+  2. gate the restart:                 sball-node-verify --smoke
+  3. restart the service:              systemctl restart sballd.service
+  4. confirm quorate:                  sball-addition watcher --once && pvm --stat
+  5. keep the watcher alive:           systemctl enable --now sball-addition-watcher.service
+
+Roll out the cluster (one node at a time, master last, quorum safe)
+------------------------------------------------------------------
+  sudo sball-rollout --nodes=nodes.txt --maintenance="CHG-xxxx" --dry-run
+  sudo sball-rollout --nodes=nodes.txt --rpm=/root/sball-addition-${VERSION}-1.x86_64.rpm --smoke
+
+Rollback
+--------
+  # bypass all hooks for one start
+  SBALL_ADDITION_SKIP_WRAPPER=1 systemctl start sballd.service
+
+  # back to a plain daemon
+  rm -f /etc/systemd/system/sballd.service.d/sball-addition.conf
+  systemctl daemon-reload && systemctl restart sballd.service
+
+  # remove the package (keeps hooks/state/logs)
+  rpm -e sball-addition
+
+  # remove everything and prove it
+  ./scripts/uninstall.sh
+
+Optional Prometheus metrics (node_exporter textfile collector)
+-------------------------------------------------------------
+  echo 'SBALL_METRICS_ARGS=--out /var/lib/node_exporter/textfile_collector/sball-addition.prom' \
+      >> /etc/sysconfig/sball-addition
+  systemctl enable --now sball-addition-metrics.timer
+
+  Alert examples (see README-DEPLOY.md):
+    sball_addition_quorate == 0
+    increase(sball_addition_poll_timeouts_total[15m]) > 0
+    increase(sball_addition_phase_aborts_total[15m]) > 0
+    time() - sball_addition_hook_last_success_timestamp_seconds > 86400
+
+Read README-DEPLOY.md before the first production rollout.
